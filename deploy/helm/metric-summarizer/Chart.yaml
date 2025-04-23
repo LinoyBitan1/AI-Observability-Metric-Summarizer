@@ -1,0 +1,5 @@
+apiVersion: v2
+name: metrics-summarizer
+description: AI Observability Metrics Summarizer (Preprocessor + Summarizer)
+version: 0.1.0
+appVersion: "1.0"

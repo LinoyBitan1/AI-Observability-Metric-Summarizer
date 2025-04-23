@@ -1,0 +1,25 @@
+preprocessor:
+  image:
+    repository: quay.io/your-org/metrics-preprocessor
+    tag: latest
+    pullPolicy: Always
+  service:
+    port: 8001
+  env:
+    PROM_METRICS_URL: http://vllm.default.svc:8080/metrics
+    MINIO_ENDPOINT: http://minio.llama-stack-namespace.svc:9000
+    MINIO_ACCESS_KEY: minio-access
+    MINIO_SECRET_KEY: minio-secret
+    MINIO_BUCKET: metrics
+
+summarizer:
+  image:
+    repository: quay.io/your-org/metrics-summarizer
+    tag: latest
+    pullPolicy: Always
+  service:
+    port: 8000
+  env:
+    PREPROCESSOR_URL: http://preprocessor:8001/metrics-summary
+    OPENAI_API_KEY: <your-openai-api-key-here>
+    OPENAI_MODEL: gpt-4

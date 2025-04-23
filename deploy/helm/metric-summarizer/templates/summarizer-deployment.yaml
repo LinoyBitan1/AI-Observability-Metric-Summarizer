@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: summarizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: summarizer
+  template:
+    metadata:
+      labels:
+        app: summarizer
+    spec:
+      containers:
+        - name: summarizer
+          image: "{{ .Values.summarizer.image.repository }}:{{ .Values.summarizer.image.tag }}"
+          imagePullPolicy: {{ .Values.summarizer.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.summarizer.service.port }}
+          env:
+            - name: PREPROCESSOR_URL
+              value: "{{ .Values.summarizer.env.PREPROCESSOR_URL }}"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-secret
+                  key: OPENAI_API_KEY
+            - name: OPENAI_MODEL
+              value: "{{ .Values.summarizer.env.OPENAI_MODEL }}"
