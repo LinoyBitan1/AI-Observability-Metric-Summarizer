@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-preprocessor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: metrics-preprocessor
+  template:
+    metadata:
+      labels:
+        app: metrics-preprocessor
+    spec:
+      containers:
+        - name: metrics-preprocessor
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          env:
+            - name: PROM_METRICS_URL
+              value: "{{ .Values.env.PROM_METRICS_URL }}"
+            - name: MINIO_ENDPOINT
+              value: "{{ .Values.env.MINIO_ENDPOINT }}"
+            - name: MINIO_ACCESS_KEY
+              value: "{{ .Values.env.MINIO_ACCESS_KEY }}"
+            - name: MINIO_SECRET_KEY
+              value: "{{ .Values.env.MINIO_SECRET_KEY }}"
+            - name: MINIO_BUCKET
+              value: "{{ .Values.env.MINIO_BUCKET }}"
