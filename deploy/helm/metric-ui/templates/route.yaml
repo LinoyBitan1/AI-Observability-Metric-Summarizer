@@ -1,0 +1,13 @@
+{{- if .Values.route.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ .Release.Name }}-route
+spec:
+  to:
+    kind: Service
+    name: {{ .Release.Name }}-svc
+  port:
+    targetPort: 8501
+  host: {{ .Values.route.host }}
+{{- end }}

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+data:
+  PROMETHEUS_URL: "{{ .Values.config.PROMETHEUS_URL }}"
+  DEEPINFRA_MODEL: "{{ .Values.config.DEEPINFRA_MODEL }}"
