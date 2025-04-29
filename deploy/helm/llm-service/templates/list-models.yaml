@@ -1,0 +1,5 @@
+{{- if .Values._debugListModels }}
+{{- range $key, $model := .Values.models }}
+model: {{ $key }} ({{ $model.id }})
+{{- end }}
+{{- end }}
