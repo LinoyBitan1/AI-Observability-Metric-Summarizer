@@ -17,4 +17,4 @@ config:
   DEEPINFRA_MODEL: "mistralai/Mistral-7B-Instruct-v0.1"
 
 secrets:
-  DEEPINFRA_API_KEY: "ho3iee0b6oxZuOSMiNUXFRHCDN47R7I9"
+  DEEPINFRA_API_KEY: "<api-key>"
