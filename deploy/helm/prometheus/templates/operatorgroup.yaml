@@ -1,0 +1,8 @@
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: prometheus-operator-group
+  namespace: llama-rag-new
+spec:
+  targetNamespaces:
+    - llama-rag-new

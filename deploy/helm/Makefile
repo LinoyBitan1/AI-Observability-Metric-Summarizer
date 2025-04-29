@@ -18,12 +18,10 @@ CHART_PATH ?= rag-ui
 HF_TOKEN ?= $(shell bash -c 'read -r -p "Enter Hugging Face Token: " HF_TOKEN; echo $$HF_TOKEN')
 LLM_SERVICE_CHART_PATH ?= llm-service
 LLM_SERVICE_RELEASE_NAME ?= llm-service
-MCP_SERVERS_CHART_PATH ?= mcp-servers
-MCP_SERVERS_RELEASE_NAME ?= mcp-servers
-INGESTION_PIPELINE_CHART_PATH ?= ingestion-pipeline
-INGESTION_PIPELINE_RELEASE_NAME ?= ingestion-pipeline
-CONFIGURE_PIPELINE_SERVER_CHART_PATH ?= configure-pipeline-server
-CONFIGURE_PIPELINE_SERVER_RELEASE_NAME ?= configure-pipeline-server
+METRIC_UI_CHART_PATH ?= metric-ui
+METRIC_UI_RELEASE_NAME ?= metric-ui
+PROMETHEUS_CHART_PATH ?= prometheus
+PROMETHEUS_RELEASE_NAME ?= prometheus
 TOLERATIONS_TEMPLATE=[{"key":"$(1)","effect":"NoSchedule","operator":"Exists"}]
 
 #ingestion pipeline configuration
@@ -93,13 +91,6 @@ secrets:
 	oc annotate secret minio -n $(NAMESPACE) meta.helm.sh/release-name=rag meta.helm.sh/release-namespace=$(NAMESPACE)
 	@touch secrets
 
-.PHONY: pg-vector
-pg-vector:
-
-	@echo "Bootstrapping pgvector database"
-	oc rollout status sts/pgvector
-	oc exec -it sts/pgvector -- psql -U postgres -c "CREATE DATABASE $(POSTGRES_DBNAME);" ||:
-	oc exec -it sts/pgvector -- psql -U postgres -d $(POSTGRES_DBNAME) -c "CREATE EXTENSION VECTOR;" ||:
 
 .PHONY: install-mcp-servers
 install-mcp-servers: namespace
@@ -107,27 +98,12 @@ install-mcp-servers: namespace
 	@echo "Deploying Helm chart $(MCP_SERVERS_CHART_PATH) as release $(MCP_SERVERS_RELEASE_NAME) in namespace $(NAMESPACE)..."
 	helm upgrade --install $(MCP_SERVERS_RELEASE_NAME) $(MCP_SERVERS_CHART_PATH) -n $(NAMESPACE)
 
-.PHONY: configure-pipeline-server
-configure-pipeline-server: namespace
-	
-	@echo "Deploying Helm chart $(CONFIGURE_PIPELINE_SERVER_CHART_PATH) as release $(CONFIGURE_PIPELINE_SERVER_RELEASE_NAME) in namespace $(NAMESPACE)..."
-	helm upgrade --install $(CONFIGURE_PIPELINE_SERVER_RELEASE_NAME) $(CONFIGURE_PIPELINE_SERVER_CHART_PATH) -n $(NAMESPACE)
-
-
 set_ingestion_args = \
 	$(if $(SOURCE),--set source='$(SOURCE)',) \
 	$(if $(EMBEDDING_MODEL),--set embedding_model='$(EMBEDDING_MODEL)',) \
 	$(if $(INGESTION_PIPELINE_NAME),--set name='$(INGESTION_PIPELINE_NAME)',) \
 	$(if $(INGESTION_PIPELINE_VERSION),--set version='$(INGESTION_PIPELINE_VERSION)',) \
     $(if $(SOURCE),--set-json S3='$(call S3_TEMPLATE,$(ACCESS_KEY_ID),$(SECRET_ACCESS_KEY),$(BUCKET_NAME),$(ENDPOINT_URL),$(REGION))',) 
-
-.PHONY: create-ingestion-pipeline
-create-ingestion-pipeline: namespace
-
-	@$(eval INGESTION_ARGS := $(call set_ingestion_args))
-
-	@echo "Deploying Helm chart $(INGESTION_PIPELINE_CHART_PATH) as release $(INGESTION_PIPELINE_RELEASE_NAME) in namespace $(NAMESPACE)..."
-	helm upgrade --install $(INGESTION_PIPELINE_RELEASE_NAME) $(INGESTION_PIPELINE_CHART_PATH) -n $(NAMESPACE) $(INGESTION_ARGS) ||:
 
 list-models-%:
 	@helm template dummy-release $(LLM_SERVICE_CHART_PATH) --set _debugListModels=true --values $(LLM_SERVICE_CHART_PATH)/values-$*.yaml |grep ^model
@@ -161,30 +137,29 @@ helm_llama_stack_args = \
     $(if $(LLM_API_TOKEN),--set-json llama-stack.models.$(LLM).apiToken='"$(LLM_API_TOKEN)"',) \
     $(if $(SAFETY_API_TOKEN),--set-json llama-stack.models.$(SAFETY).apiToken='"$(SAFETY_API_TOKEN)"',) \
 
-.PHONY: create-minio-bucket
-create-minio-bucket:
-	oc wait --for=condition=Ready pod/minio-0 --timeout=300s
-	sleep 5
-	oc exec minio-0 -- bash -c "mc alias set local http://localhost:9000 $(MINIO_USER) $(MINIO_PASSWORD) && mc mb local/$(BUCKET_NAME)" ||:
+.PHONY: install-metric-ui
+install-mcp-servers: namespace
 
-.PHONY: install-rag
-install-rag: namespace secrets install-mcp-servers
+	@echo "Deploying Helm chart $(METRIC_UI_CHART_PATH) as release $(METRIC_UI_RELEASE_NAME) in namespace $(NAMESPACE)..."
+	helm upgrade --install $(METRIC_UI_RELEASE_NAME) $(METRIC_UI_CHART_PATH) -n $(NAMESPACE)
+
+.PHONY: install-prometheus
+install-mcp-servers: namespace
+
+	@echo "Deploying Helm chart $(PROMETHEUS_CHART_PATH) as release $(PROMETHEUS_RELEASE_NAME) in namespace $(NAMESPACE)..."
+	helm upgrade --install $(PROMETHEUS_RELEASE_NAME) $(PROMETHEUS_CHART_PATH) -n $(NAMESPACE)
+
+.PHONY: install-ui
+install-ui: namespace secrets install-metric-ui
 	@$(eval HELM_ARGS := $(call helm_llama_stack_args))
-
-	@echo "Deploying Helm chart $(CHART_PATH) as release $(RELEASE_NAME) in namespace $(NAMESPACE)..."
-	helm upgrade --install $(RELEASE_NAME) $(CHART_PATH) -n $(NAMESPACE) $(HELM_ARGS) $(EXTRA_HELM_ARGS)
-
-	@$(MAKE) pg-vector
-	@$(MAKE) create-minio-bucket
-	
+	@$(MAKE) create-prometheus
+	@$(MAKE) install-metric-ui
 	@$(MAKE) status
-	@$(MAKE) configure-pipeline-server
-	@$(MAKE) create-ingestion-pipeline
-
+    
 	@echo "Waiting for deployment to be ready..."
 	@$(MAKE) wait
 
-install-%: install-llm-service-% install-rag
+install-%: install-llm-service-% install-ui
 	@echo "Installed from target install-$*"
 
 .PHONY: install
