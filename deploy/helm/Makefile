@@ -61,11 +61,12 @@ help:
 	@echo "  {SAFETY,LLM}_TOLERATION  - Model pod toleration"
 
 # Create namespace and deploy
+.PHONY: namespace
 namespace:
 	@echo "Creating namespace $(NAMESPACE)..."
 	oc create namespace $(NAMESPACE) && oc label namespace $(NAMESPACE) modelmesh-enabled=false || oc project $(NAMESPACE) ||:
-	@touch namespace
 
+.PHONY: secrets
 secrets:
 	@echo "Creating Hugging Face secret..."
 	oc create secret -n $(NAMESPACE) generic huggingface-secret --from-literal=HF_TOKEN="$(HF_TOKEN)" --dry-run=client -o yaml | oc apply -f -
@@ -91,12 +92,6 @@ secrets:
 	oc annotate secret minio -n $(NAMESPACE) meta.helm.sh/release-name=rag meta.helm.sh/release-namespace=$(NAMESPACE)
 	@touch secrets
 
-
-.PHONY: install-mcp-servers
-install-mcp-servers: namespace
-
-	@echo "Deploying Helm chart $(MCP_SERVERS_CHART_PATH) as release $(MCP_SERVERS_RELEASE_NAME) in namespace $(NAMESPACE)..."
-	helm upgrade --install $(MCP_SERVERS_RELEASE_NAME) $(MCP_SERVERS_CHART_PATH) -n $(NAMESPACE)
 
 set_ingestion_args = \
 	$(if $(SOURCE),--set source='$(SOURCE)',) \
@@ -137,22 +132,43 @@ helm_llama_stack_args = \
     $(if $(LLM_API_TOKEN),--set-json llama-stack.models.$(LLM).apiToken='"$(LLM_API_TOKEN)"',) \
     $(if $(SAFETY_API_TOKEN),--set-json llama-stack.models.$(SAFETY).apiToken='"$(SAFETY_API_TOKEN)"',) \
 
-.PHONY: install-metric-ui
-install-mcp-servers: namespace
-
-	@echo "Deploying Helm chart $(METRIC_UI_CHART_PATH) as release $(METRIC_UI_RELEASE_NAME) in namespace $(NAMESPACE)..."
-	helm upgrade --install $(METRIC_UI_RELEASE_NAME) $(METRIC_UI_CHART_PATH) -n $(NAMESPACE)
-
 .PHONY: install-prometheus
-install-mcp-servers: namespace
-
-	@echo "Deploying Helm chart $(PROMETHEUS_CHART_PATH) as release $(PROMETHEUS_RELEASE_NAME) in namespace $(NAMESPACE)..."
+install-prometheus: namespace
+	@echo "Deploying Prometheus subscription..."
 	helm upgrade --install $(PROMETHEUS_RELEASE_NAME) $(PROMETHEUS_CHART_PATH) -n $(NAMESPACE)
 
+	@echo "Waiting for Prometheus operator CSV to be Succeeded..."
+	oc wait --for=jsonpath='{.status.phase}'=Succeeded csv -n $(NAMESPACE) -l operators.coreos.com/prometheus.$(NAMESPACE) --timeout=300s || \
+	echo "Timed out waiting for CSV"
+
+.PHONY: list-models-to-configmap
+list-models-to-configmap:
+	@echo "Generating model list and creating ConfigMap..."
+	@helm template dummy-release $(LLM_SERVICE_CHART_PATH) --set _debugListModels=true \
+		--values $(LLM_SERVICE_CHART_PATH)/values-gpu.yaml | grep ^model | awk '{print $$2}' \
+		| jq -R -s -c 'split("\n") - [""]' > tmp-models.json
+
+	@echo "tmp-models.json content:" && cat tmp-models.json
+	@MODELS_JSON=$$(cat tmp-models.json | jq -c .); \
+	oc create configmap llm-models \
+	  --from-literal=models="$$MODELS_JSON" \
+	  -n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -
+
+
+.PHONY: install-metric-ui
+install-metric-ui: namespace
+	@echo "Deploying Helm chart $(METRIC_UI_CHART_PATH) as release $(METRIC_UI_RELEASE_NAME) in namespace $(NAMESPACE)..."
+	helm upgrade --install $(METRIC_UI_RELEASE_NAME) $(METRIC_UI_CHART_PATH) \
+		-n $(NAMESPACE) \
+		--set llm.url="$(LLM_URL)" \
+		--set llm.apiToken="$(LLM_API_TOKEN)"
+
+
 .PHONY: install-ui
-install-ui: namespace secrets install-metric-ui
+install-ui: namespace secrets install-prometheus list-models-to-configmap install-metric-ui 
 	@$(eval HELM_ARGS := $(call helm_llama_stack_args))
-	@$(MAKE) create-prometheus
+	@$(MAKE) install-prometheus
+
 	@$(MAKE) install-metric-ui
 	@$(MAKE) status
     
@@ -167,7 +183,7 @@ install: install-gpu
 
 # Uninstall the deployment and clean up
 .PHONY: uninstall
-uninstall: uninstall-helm-release uninstall-mcp-servers uninstall-ingestion-pipeline uninstall-llm-service remove-secrets remove-pvcs
+uninstall: uninstall-helm-release uninstall-llm-service remove-secrets remove-pvcs
 
 	@echo "Checking for any remaining resources in namespace $(NAMESPACE)..."
 	@echo "If you want to completely remove the namespace, run: oc delete project $(NAMESPACE)"

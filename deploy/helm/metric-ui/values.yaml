@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: quay.io/ecosystem-appeng/metric-ui
-  tag: 0.15
+  tag: 0.21
 
 service:
   type: ClusterIP
@@ -13,8 +13,12 @@ route:
   host: ai-metrics-summarizer.example.com
 
 config:
-  PROMETHEUS_URL: "http://prometheus-operated.llama-1.svc.cluster.local:9090"
-  DEEPINFRA_MODEL: "mistralai/Mistral-7B-Instruct-v0.1"
+  PROMETHEUS_URL: ""
+  # DEEPINFRA_MODEL: "mistralai/Mistral-7B-Instruct-v0.1"
 
-secrets:
-  DEEPINFRA_API_KEY: "<api-key>"
+# secrets:
+#   DEEPINFRA_API_KEY: "ho3iee0b6oxZuOSMiNUXFRHCDN47R7I9"
+
+llm:
+  url: ""
+  apiToken: ""
