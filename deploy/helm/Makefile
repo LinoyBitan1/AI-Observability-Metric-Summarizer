@@ -157,11 +157,12 @@ list-models-to-configmap:
 
 .PHONY: install-metric-ui
 install-metric-ui: namespace
-	@echo "Deploying Helm chart $(METRIC_UI_CHART_PATH) as release $(METRIC_UI_RELEASE_NAME) in namespace $(NAMESPACE)..."
+	@echo "Extracting LLM service URL"
+	LLM_URL=$$(oc get inferenceservice llama-3-2-3b-instruct -n $(NAMESPACE) -o jsonpath='{.status.url}'); \
+	echo "Detected LLM_URL=$$LLM_URL"; \
 	helm upgrade --install $(METRIC_UI_RELEASE_NAME) $(METRIC_UI_CHART_PATH) \
 		-n $(NAMESPACE) \
-		--set llm.url="$(LLM_URL)" \
-		--set llm.apiToken="$(LLM_API_TOKEN)"
+		--set-json llm.url="\"$$LLM_URL\""
 
 
 .PHONY: install-ui

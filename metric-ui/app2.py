@@ -10,6 +10,7 @@ import json
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL")
 LLM_URL = os.getenv("LLM_URL")
 LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
+LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"  # Fixed model
 model_list_json = os.getenv("LLM_MODELS", '["Unknown"]')
 model_names = json.loads(model_list_json)
 
@@ -61,13 +62,32 @@ def build_prompt(metric_dfs, model_name):
 
 def summarize_with_llm(prompt):
     headers = {
-        "Authorization": f"Bearer {LLM_API_TOKEN}",
         "Content-Type": "application/json"
     }
-    payload = {"input": prompt, "temperature": 0.5, "max_tokens": 300}
-    response = requests.post(LLM_URL, headers=headers, json=payload)
+    if LLM_API_TOKEN:
+        headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
+
+    # Fetch available models from LLM_URL
+    try:
+        model_response = requests.get(f"{LLM_URL}/v1/models", headers=headers, verify=False)
+        model_response.raise_for_status()
+        model_data = model_response.json()
+        model_id = model_data["data"][0]["id"]
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch summarization model ID from {LLM_URL}: {e}")
+
+    # Prepare payload
+    payload = {
+        "model": model_id,
+        "prompt": prompt,
+        "temperature": 0.5,
+        "max_tokens": 300
+    }
+
+    # Send summarization request
+    response = requests.post(f"{LLM_URL}/v1/completions", headers=headers, json=payload, verify=False)
     response.raise_for_status()
-    return response.json()["results"][0]["generated_text"].strip()
+    return response.json()["choices"][0]["text"].strip()
 
 # --- Layout Config ---
 st.set_page_config(page_title="AI Model Metrics Dashboard", page_icon="📊", layout="wide")
@@ -83,6 +103,7 @@ st.markdown("""
 # --- Page Toggle ---
 page = st.sidebar.radio("Navigation", ["📈 Analyze Metrics", "💬 Chat with Assistant"])
 model = st.sidebar.selectbox("Select AI Model", model_names)
+st.session_state["selected_model"] = model
 
 # --- Page: Analyze Metrics ---
 if page == "📈 Analyze Metrics":
@@ -145,4 +166,4 @@ elif page == "💬 Chat with Assistant":
 
 # --- Footer Branding ---
 st.markdown("---")
-st.caption("Built with ❤️ by your-team · Powered by Prometheus & Your LLM")
+st.caption("Built with ❤️ by your-team · Powered by Prometheus & LlamaStack")
