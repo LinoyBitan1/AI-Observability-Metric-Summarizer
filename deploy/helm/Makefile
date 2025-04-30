@@ -145,7 +145,7 @@ install-prometheus: namespace
 list-models-to-configmap:
 	@echo "Generating model list and creating ConfigMap..."
 	@helm template dummy-release $(LLM_SERVICE_CHART_PATH) --set _debugListModels=true \
-		--values $(LLM_SERVICE_CHART_PATH)/values-gpu.yaml | grep ^model | awk '{print $$2}' \
+		--values $(LLM_SERVICE_CHART_PATH)/values-cpu.yaml | grep ^model | awk '{print $$2}' \
 		| jq -R -s -c 'split("\n") - [""]' > tmp-models.json
 
 	@echo "tmp-models.json content:" && cat tmp-models.json
