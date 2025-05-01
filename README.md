@@ -1,5 +1,7 @@
 # AI Observability Metrics Summarizer
 
+![Design Document](https://docs.google.com/document/d/1bXBCL4fbPlRqQxwhGX1p12CS_E6-9oOyFnYSpbQskyI/edit?usp=sharing)
+
 This application provides an interactive dashboard and chatbot interface to **analyze AI model performance metrics** collected from Prometheus and generate **human-like summaries using a Llama model** deployed on OpenShift AI.
 
 It helps teams **understand what’s going well, what’s going wrong**, and receive **actionable recommendations** on their vLLM deployments — all automatically.
@@ -49,6 +51,10 @@ This will:
 3. Extract their URLs  
 4. Create a ConfigMap with available models  
 5. Deploy the Streamlit dashboard connected to the LLM  
+
+![UI](UI-1.png)
+
+![UI](UI-1.png)
 
 To uninstall:
 ```bash
