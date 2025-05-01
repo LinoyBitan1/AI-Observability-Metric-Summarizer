@@ -3,5 +3,5 @@ kind: ConfigMap
 metadata:
   name: {{ .Release.Name }}-config
 data:
-  PROMETHEUS_URL: "{{ .Values.config.PROMETHEUS_URL }}"
-  DEEPINFRA_MODEL: "{{ .Values.config.DEEPINFRA_MODEL }}"
+  PROMETHEUS_URL: "http://prometheus-operated.{{ .Release.Namespace }}.svc.cluster.local:9090"
+  # DEEPINFRA_MODEL: "{{ .Values.config.DEEPINFRA_MODEL }}"

@@ -3,13 +3,18 @@ import pandas as pd
 import requests
 from datetime import datetime
 import matplotlib.pyplot as plt
+import os
+import json
 
-# --- Config ---
-PROMETHEUS_URL = "http://prometheus-operated.llama-1.svc.cluster.local:9090"
-DEEPINFRA_API_KEY = "api-key"
-DEEPINFRA_MODEL = "mistralai/Mistral-7B-Instruct-v0.1"
-DEEPINFRA_URL = f"https://api.deepinfra.com/v1/inference/{DEEPINFRA_MODEL}"
+# --- Config from ENV ---
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL")
+LLM_URL = os.getenv("LLM_URL")
+LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
+LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"  # Fixed model
+model_list_json = os.getenv("LLM_MODELS", '["Unknown"]')
+model_names = json.loads(model_list_json)
 
+# --- Metrics definitions ---
 ALL_METRICS = {
     "Prompt Tokens Created": "vllm:prompt_tokens_created",
     "P95 Latency (s)": "vllm:e2e_request_latency_seconds_count",
@@ -55,28 +60,34 @@ def build_prompt(metric_dfs, model_name):
     prompt += "\nPlease summarize:\n1. Key findings\n2. Possible issues\n3. Recommended action items"
     return prompt
 
-def summarize_with_deepinfra(prompt):
+def summarize_with_llm(prompt):
     headers = {
-        "Authorization": f"Bearer {DEEPINFRA_API_KEY}",
         "Content-Type": "application/json"
     }
-    payload = {"input": prompt, "temperature": 0.5, "max_tokens": 300}
-    response = requests.post(DEEPINFRA_URL, headers=headers, json=payload)
-    response.raise_for_status()
-    return response.json()["results"][0]["generated_text"].strip()
+    if LLM_API_TOKEN:
+        headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
 
-def get_model_names():
+    # Fetch available models from LLM_URL
     try:
-        response = requests.get(
-            f"{PROMETHEUS_URL}/api/v1/series",
-            params={"match[]": "vllm:e2e_request_latency_seconds_count"},
-            verify=False
-        )
-        response.raise_for_status()
-        series = response.json()["data"]
-        return sorted(set(i.get("model_name") for i in series if "model_name" in i)) or ["Unknown"]
-    except:
-        return ["Unknown"]
+        model_response = requests.get(f"{LLM_URL}/v1/models", headers=headers, verify=False)
+        model_response.raise_for_status()
+        model_data = model_response.json()
+        model_id = model_data["data"][0]["id"]
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch summarization model ID from {LLM_URL}: {e}")
+
+    # Prepare payload
+    payload = {
+        "model": model_id,
+        "prompt": prompt,
+        "temperature": 0.5,
+        "max_tokens": 300
+    }
+
+    # Send summarization request
+    response = requests.post(f"{LLM_URL}/v1/completions", headers=headers, json=payload, verify=False)
+    response.raise_for_status()
+    return response.json()["choices"][0]["text"].strip()
 
 # --- Layout Config ---
 st.set_page_config(page_title="AI Model Metrics Dashboard", page_icon="📊", layout="wide")
@@ -90,19 +101,18 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- Page Toggle ---
-page = st.sidebar.radio("Navigation", ["📊 Analyze Metrics", "💬 Chat with Assistant"])
-model_names = get_model_names()
+page = st.sidebar.radio("Navigation", ["📈 Analyze Metrics", "💬 Chat with Assistant"])
 model = st.sidebar.selectbox("Select AI Model", model_names)
-st.sidebar.selectbox("LLM for Summarization", [DEEPINFRA_MODEL], disabled=True)
+st.session_state["selected_model"] = model
 
 # --- Page: Analyze Metrics ---
-if page == "📊 Analyze Metrics":
+if page == "📈 Analyze Metrics":
     if st.button("Analyze Metrics"):
         with st.spinner("Fetching and analyzing..."):
             try:
                 metric_dfs = {label: fetch_metrics(query) for label, query in ALL_METRICS.items()}
                 summary_prompt = build_prompt(metric_dfs, model)
-                summary = summarize_with_deepinfra(summary_prompt)
+                summary = summarize_with_llm(summary_prompt)
 
                 st.session_state.analyzed = True
                 st.session_state.prompt = summary_prompt
@@ -111,7 +121,6 @@ if page == "📊 Analyze Metrics":
                 with col1:
                     st.subheader("📋 Summary")
                     st.markdown(f"**Model:** `{model}`")
-                    st.markdown(f"**LLM:** `{DEEPINFRA_MODEL}`")
                     st.markdown(summary)
 
                 with col2:
@@ -128,6 +137,7 @@ if page == "📊 Analyze Metrics":
                         fig, ax = plt.subplots()
                         pie_df.plot.pie(autopct="%.1f%%", ax=ax, title="GPU vs Latency (Avg)", ylabel="")
                         st.pyplot(fig)
+
             except Exception as e:
                 st.error(f"❌ Error: {e}")
 
@@ -146,7 +156,7 @@ elif page == "💬 Chat with Assistant":
         )
 
         with st.spinner("Thinking..."):
-            reply = summarize_with_deepinfra(prompt)
+            reply = summarize_with_llm(prompt)
 
         st.session_state.chat_history.append(("user", user_input))
         st.session_state.chat_history.append(("ai", reply))
@@ -156,4 +166,4 @@ elif page == "💬 Chat with Assistant":
 
 # --- Footer Branding ---
 st.markdown("---")
-st.caption("Built with ❤️ by your-team · Powered by Prometheus & DeepInfra")
+st.caption("Built with ❤️ by your-team · Powered by Prometheus & LlamaStack")

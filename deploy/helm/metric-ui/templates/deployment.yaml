@@ -23,13 +23,22 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: PROMETHEUS_URL
-            - name: DEEPINFRA_MODEL
+            - name: LLM_URL
+              value: "{{ .Values.llm.url }}"  
+            - name: LLM_API_TOKEN
+              value: "{{ .Values.llm.apiToken }}"  
+            - name: LLM_MODELS
               valueFrom:
                 configMapKeyRef:
-                  name: {{ .Release.Name }}-config
-                  key: DEEPINFRA_MODEL
-            - name: DEEPINFRA_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Release.Name }}-secrets
-                  key: DEEPINFRA_API_KEY
+                  name: llm-models
+                  key: models      
+            # - name: DEEPINFRA_MODEL
+            #   valueFrom:
+            #     configMapKeyRef:
+            #       name: {{ .Release.Name }}-config
+            #       key: DEEPINFRA_MODEL
+            # - name: DEEPINFRA_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: {{ .Release.Name }}-secrets
+            #       key: DEEPINFRA_API_KEY
