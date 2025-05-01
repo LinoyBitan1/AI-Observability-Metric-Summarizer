@@ -7,11 +7,12 @@ import os
 import json
 
 # --- Config from ENV ---
-PROMETHEUS_URL = "http://localhost:9090"
-LLM_URL =  "http://localhost:8080"
-LLM_API_TOKEN = ""
-LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"
-model_names = ["meta-llama/Llama-3.2-3B-Instruct","meta-llama/Llama-Guard-3-8B"]
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL")
+LLM_URL = os.getenv("LLM_URL")
+LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
+LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"  # Fixed model
+model_list_json = os.getenv("LLM_MODELS", '["Unknown"]')
+model_names = json.loads(model_list_json)
 
 ALL_METRICS = {
     "Prompt Tokens Created": "vllm:prompt_tokens_created",
