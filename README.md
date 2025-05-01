@@ -23,7 +23,7 @@ It helps teams **understand what’s going well, what’s going wrong**, and rec
 - **Streamlit App**: Renders dashboard, handles summarization and chat  
 - **LLM (Llama 3.x)**: Deployed on OpenShift AI and queried via `/v1/completions` API  
 
-![Architecture](arch.jpg)
+![Architecture](docs/img/arch.jpg)
 
 ---
 
@@ -54,9 +54,9 @@ This will:
 4. Create a ConfigMap with available models  
 5. Deploy the Streamlit dashboard connected to the LLM  
 
-![UI](UI-1.png)
+![UI](docs/img/UI-1.png)
 
-![UI-1](UI-2.png)
+![UI-1](docs/img/UI-2.png)
 
 To uninstall:
 ```bash
