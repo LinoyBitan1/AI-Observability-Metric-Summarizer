@@ -77,7 +77,6 @@ make uninstall NAMESPACE=llama-namespace
 ## Powered By
 
 - [OpenShift AI](https://www.redhat.com/en/technologies/cloud-computing/openshift/openshift-ai)
-- [LlamaStack](https://github.com/open-webui/llamastack)
 - [Prometheus](https://prometheus.io/)
 - [Streamlit](https://streamlit.io/)
 
