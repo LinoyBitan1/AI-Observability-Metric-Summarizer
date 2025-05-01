@@ -13,8 +13,10 @@ POSTGRES_PASSWORD ?= rag_password
 POSTGRES_DBNAME ?= rag_blueprint
 MINIO_USER ?= minio_rag_user
 MINIO_PASSWORD ?= minio_rag_password
-RELEASE_NAME ?= rag
+RELEASE_NAME ?= rag-ui
 CHART_PATH ?= rag-ui
+LLAMA_STACK_CHART_PATH ?= llama-stack
+LLAMA_STACK_RELEASE_NAME ?= llama-stack
 HF_TOKEN ?= $(shell bash -c 'read -r -p "Enter Hugging Face Token: " HF_TOKEN; echo $$HF_TOKEN')
 LLM_SERVICE_CHART_PATH ?= llm-service
 LLM_SERVICE_RELEASE_NAME ?= llm-service
@@ -143,13 +145,27 @@ install-prometheus: namespace
 
 .PHONY: list-models-to-configmap
 list-models-to-configmap:
-	@echo "Generating model list and creating ConfigMap..."
-	@helm template dummy-release $(LLM_SERVICE_CHART_PATH) --set _debugListModels=true \
-		--values $(LLM_SERVICE_CHART_PATH)/values-cpu.yaml | grep ^model | awk '{print $$2}' \
-		| jq -R -s -c 'split("\n") - [""]' > tmp-models.json
+	@echo "Generating model ID list from values-gpu.yaml for specified models: $(LLM) $(SAFETY)..."
+
+	@touch tmp-models.json
+	@echo "[]" > tmp-models.json
+
+	@if [ -n "$(LLM)" ]; then \
+		id=$$(yq e '.models.$(LLM).id' $(LLM_SERVICE_CHART_PATH)/values-gpu.yaml); \
+		if [ "$$id" != "null" ]; then \
+			jq --arg id "$$id" '. + [$$id]' tmp-models.json > tmp-models.json.new && mv tmp-models.json.new tmp-models.json; \
+		fi; \
+	fi
+
+	@if [ -n "$(SAFETY)" ]; then \
+		id=$$(yq e '.models.$(SAFETY).id' $(LLM_SERVICE_CHART_PATH)/values-gpu.yaml); \
+		if [ "$$id" != "null" ]; then \
+			jq --arg id "$$id" '. + [$$id]' tmp-models.json > tmp-models.json.new && mv tmp-models.json.new tmp-models.json; \
+		fi; \
+	fi
 
 	@echo "tmp-models.json content:" && cat tmp-models.json
-	@MODELS_JSON=$$(cat tmp-models.json | jq -c .); \
+	@MODELS_JSON=$$(cat tmp-models.json); \
 	oc create configmap llm-models \
 	  --from-literal=models="$$MODELS_JSON" \
 	  -n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -

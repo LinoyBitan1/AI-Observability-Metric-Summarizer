@@ -8,11 +8,12 @@ import json
 
 # --- Config from ENV ---
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL")
-LLM_URL = os.getenv("LLM_URL")
+LLM_URL =  os.getenv("LLM_URL")
 LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
-LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"  # Fixed model
+LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"
 model_list_json = os.getenv("LLM_MODELS", '["Unknown"]')
 model_names = json.loads(model_list_json)
+# model_names = ["meta-llama/Llama-3.2-3B-Instruct","meta-llama/Llama-Guard-3-8B"]
 
 # --- Metrics definitions ---
 ALL_METRICS = {
@@ -35,11 +36,21 @@ if "chat_history" not in st.session_state:
 if "last_user_input" not in st.session_state:
     st.session_state.last_user_input = ""
 
-# --- Utilities ---
-def fetch_metrics(query):
-    response = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": query}, verify=False)
+def fetch_metrics(query, model_name):
+    # Use exact match with properly quoted string
+    promql_query = f'{query}{{model_name="{model_name}"}}'
+
+    # Debug: Show the actual request being sent
+    print("PROMQL Query:", promql_query)
+    response = requests.get(
+        f"{PROMETHEUS_URL}/api/v1/query",
+        params={"query": promql_query},
+        verify=False
+    )
     response.raise_for_status()
     result = response.json()["data"]["result"]
+
+    # Parse into DataFrame
     rows = []
     for r in result:
         metric = r["metric"]
@@ -48,56 +59,46 @@ def fetch_metrics(query):
         metric["value"] = value
         metric["timestamp"] = timestamp
         rows.append(metric)
+
     return pd.DataFrame(rows)
 
+
 def build_prompt(metric_dfs, model_name):
-    prompt = f"""You're an observability expert analyzing AI model performance.\nModel: `{model_name}`\n\nLatest metrics:\n"""
+    summary_block = f"You're an observability expert analyzing AI model performance.\nModel: `{model_name}`\n\nLatest metrics:\n"
     for label, df in metric_dfs.items():
         if df.empty:
-            prompt += f"- {label}: No data\n"
+            summary_block += f"- {label}: No data\n"
         else:
-            prompt += f"- {label}: Avg={df['value'].mean():.2f}, Max={df['value'].max():.2f}, Count={len(df)}\n"
+            summary_block += f"- {label}: Avg={df['value'].mean():.2f}, Max={df['value'].max():.2f}, Count={len(df)}\n"
+
     prompt = f"""
-    You are an MLOps expert analyzing performance metrics for the AI model `{model}`.
+    You are an MLOps specialist evaluating the health and performance of the AI model `{model_name}` based on the following metrics:
 
-    Below is the latest summary of key metrics:
-    {st.session_state.prompt}
+    {summary_block}
 
-    Your task:
-    1. Highlight what is going well.
-    2. Identify potential problems or anomalies.
-    3. Recommend next steps or improvements.
+    Please provide a clear and concise analysis covering the following:
 
-    Please write your analysis in clear bullet points.
+    1. **What's Going Well** – Highlight metrics or trends that indicate strong performance or improvement.  
+    2. **What's Going Wrong** – Identify any issues, anomalies, or metrics indicating degradation or concern.  
+    3. **Recommended Actions** – Suggest practical next steps to maintain strengths and address issues.  
+
+    Your response should be structured using bullet points for clarity.
     """
-
     return prompt
 
+
 def summarize_with_llm(prompt):
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {"Content-Type": "application/json"}
     if LLM_API_TOKEN:
         headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
 
-    # Fetch available models from LLM_URL
-    try:
-        model_response = requests.get(f"{LLM_URL}/v1/models", headers=headers, verify=False)
-        model_response.raise_for_status()
-        model_data = model_response.json()
-        model_id = model_data["data"][0]["id"]
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch summarization model ID from {LLM_URL}: {e}")
-
-    # Prepare payload
     payload = {
-        "model": model_id,
+        "model": LLM_MODEL_SUMMARIZATION,
         "prompt": prompt,
         "temperature": 0.5,
         "max_tokens": 300
     }
 
-    # Send summarization request
     response = requests.post(f"{LLM_URL}/v1/completions", headers=headers, json=payload, verify=False)
     response.raise_for_status()
     return response.json()["choices"][0]["text"].strip()
@@ -123,21 +124,21 @@ if page == "📈 Analyze Metrics":
     if st.button("Analyze Metrics"):
         with st.spinner("Fetching and analyzing..."):
             try:
-                metric_dfs = {label: fetch_metrics(query) for label, query in ALL_METRICS.items()}
+                metric_dfs = {label: fetch_metrics(query, model) for label, query in ALL_METRICS.items()}
                 summary_prompt = build_prompt(metric_dfs, model)
+                st.session_state.prompt = summary_prompt
                 summary = summarize_with_llm(summary_prompt)
 
                 st.session_state.analyzed = True
-                st.session_state.prompt = summary_prompt
 
                 col1, col2 = st.columns([1.5, 2])
                 with col1:
-                    st.subheader("📋 Summary")
+                    st.subheader("Summary")
                     st.markdown(f"**Model:** `{model}`")
                     st.markdown(summary)
 
                 with col2:
-                    st.subheader("📈 GPU & Latency Dashboard")
+                    st.subheader("GPU & Latency Dashboard")
                     for label, df in metric_dfs.items():
                         if not df.empty:
                             st.metric(label, f"{df['value'].mean():.2f}", delta=f"Max: {df['value'].max():.2f}")
@@ -165,7 +166,7 @@ elif page == "💬 Chat with Assistant":
             f"You're a helpful MLOps assistant. Metrics for model `{model}`:\n\n{st.session_state.prompt}\n\n"
             f"User question: {user_input}"
             if st.session_state.analyzed else
-            f"You're a helpful MLOps assistant. Metrics haven't been analyzed yet.\nUser question: {user_input}"
+            f"Metrics haven't been analyzed yet.\nUser question: {user_input}"
         )
 
         with st.spinner("Thinking..."):
@@ -179,5 +180,4 @@ elif page == "💬 Chat with Assistant":
 
 # --- Footer Branding ---
 st.markdown("---")
-st.caption("Built with ❤️ by your-team · Powered by Prometheus & LlamaStack")
 st.caption("Built with ❤️ by your-team · Powered by Prometheus & LlamaStack")
