@@ -1,13 +1,16 @@
-{{- if .Values.route.enabled }}
-apiVersion: route.openshift.io/v1
 kind: Route
+apiVersion: route.openshift.io/v1
 metadata:
   name: {{ .Release.Name }}-route
 spec:
   to:
     kind: Service
     name: {{ .Release.Name }}-svc
+    weight: 100
   port:
     targetPort: 8501
-  host: {{ .Values.route.host }}
-{{- end }}
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
+  alternateBackends: []
