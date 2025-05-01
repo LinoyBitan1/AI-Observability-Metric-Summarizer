@@ -60,7 +60,7 @@ def fetch_metrics(query, model_name, start, end):
 
 
 def build_prompt(metric_dfs, model_name):
-    summary_block = f"You're an observability expert analyzing AI model performance.\nModel: `{model_name}`\n\nLatest metrics:\n"
+    summary_block = f"You're an observability expert analyzing AI model performance.\nModel: {model_name}\n\nLatest metrics:\n"
     for label, df in metric_dfs.items():
         if df.empty:
             summary_block += f"- {label}: No data\n"
@@ -68,7 +68,7 @@ def build_prompt(metric_dfs, model_name):
             summary_block += f"- {label}: Avg={df['value'].mean():.2f}, Max={df['value'].max():.2f}, Count={len(df)}\n"
 
     return f"""
-You are an MLOps specialist evaluating the health and performance of the AI model `{model_name}` based on the following metrics:
+You are an MLOps specialist evaluating the health and performance of the AI model {model_name} based on the following metrics:
 
 {summary_block}
 
@@ -149,32 +149,39 @@ if page == "📈 Analyze Metrics":
                 col1, col2 = st.columns([1.5, 2])
                 with col1:
                     st.subheader("Summary")
-                    st.markdown(f"**Model:** `{model}`")
+                    st.markdown(f"**Model:** {model}")
                     st.markdown(summary)
 
                 with col2:
-                    st.subheader("GPU & Latency Trends")
+                    st.subheader("GPU & Latency Dashboard")
 
-                    # Create a consistent time index from start to end
+                    # Metric value cards
+                    for label, df in metric_dfs.items():
+                        if not df.empty:
+                            st.metric(label, f"{df['value'].mean():.2f}", delta=f"Max: {df['value'].max():.2f}")
+
+                    # Prepare consistent timestamp range based on user input
                     full_time_index = pd.date_range(
                         start=datetime.fromtimestamp(selected_start),
                         end=datetime.fromtimestamp(selected_end),
                         freq="30S"
                     )
-
                     chart_df = pd.DataFrame(index=full_time_index)
 
+                    # Add GPU & Latency metrics to the chart
                     for label in DASHBOARD_METRICS:
                         df = metric_dfs[label]
                         if not df.empty:
                             df_plot = df[["timestamp", "value"]].set_index("timestamp").rename(columns={"value": label})
                             chart_df = chart_df.join(df_plot, how="left")
 
-                    # Fill NaNs with 0 so empty data appears as flat line
+                    # Fill missing values with 0
                     chart_df.fillna(0, inplace=True)
 
+                    # Plot line chart
                     if not chart_df.empty:
                         st.line_chart(chart_df)
+
 
 
             except Exception as e:
@@ -190,7 +197,7 @@ elif page == "💬 Chat with Assistant":
 
         if st.session_state.analyzed:
             prompt = f"""
-You are a senior MLOps analyst evaluating model `{model}`.
+You are a senior MLOps analyst evaluating model {model}.
 
 Metrics summary:
 {st.session_state.prompt.strip()}
