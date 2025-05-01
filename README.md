@@ -52,9 +52,9 @@ This will:
 4. Create a ConfigMap with available models  
 5. Deploy the Streamlit dashboard connected to the LLM  
 
-![UI](UI-1.png)
+!(UI)[UI-1.png]
 
-![UI](UI-1.png)
+!(UI)[UI-1.png]
 
 To uninstall:
 ```bash
