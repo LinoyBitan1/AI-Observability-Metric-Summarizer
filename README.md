@@ -56,7 +56,7 @@ This will:
 
 ![UI](UI-1.png)
 
-![UI-1](UI-1.png)
+![UI-1](UI-2.png)
 
 To uninstall:
 ```bash
