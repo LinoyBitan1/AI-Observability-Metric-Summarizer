@@ -10,9 +10,10 @@ import json
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL")
 LLM_URL = os.getenv("LLM_URL")
 LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
-LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"  # Fixed model
+LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"
 model_list_json = os.getenv("LLM_MODELS", '["Unknown"]')
 model_names = json.loads(model_list_json)
+
 
 ALL_METRICS = {
     "Prompt Tokens Created": "vllm:prompt_tokens_created",
@@ -113,6 +114,21 @@ if "selected_time" not in st.session_state:
 
 selected_date = st.sidebar.date_input("Date", value=st.session_state["selected_date"], key="date_input")
 selected_time = st.sidebar.time_input("Time", value=st.session_state["selected_time"], key="time_input")
+formatted_time = selected_time.strftime("%I:%M %p")  # Format to AM/PM
+st.sidebar.markdown(f"**Selected Time:** {formatted_time}")
+
+
+now = datetime.now()
+
+# Prevent user from selecting a future date
+if selected_date > now.date():
+    st.warning("You've selected a future date. Please select today or a past date.")
+    st.stop()
+
+# Prevent user from selecting a future time on the same day
+if selected_date == now.date() and selected_time > now.time():
+    st.warning("You've selected a future time. Please select a time before the current time.")
+    st.stop()
 
 # Update the session state only when changed
 st.session_state["selected_date"] = selected_date
@@ -120,7 +136,8 @@ st.session_state["selected_time"] = selected_time
 
 selected_datetime = datetime.combine(selected_date, selected_time)
 selected_start = int(selected_datetime.timestamp())
-selected_end = int(datetime.now().timestamp())
+selected_end = int(now.timestamp())  # Always use current time as end
+
 
 
 # --- Main Title ---
@@ -153,14 +170,17 @@ if page == "📈 Analyze Metrics":
                     st.markdown(summary)
 
                 with col2:
-                    st.subheader("GPU & Latency Dashboard")
+                    st.subheader("GPU & Latency Trends")
 
-                    # Metric value cards
-                    for label, df in metric_dfs.items():
+                    # Metric cards for all metrics
+                    for label in ALL_METRICS:
+                        df = metric_dfs[label]
                         if not df.empty:
-                            st.metric(label, f"{df['value'].mean():.2f}", delta=f"Max: {df['value'].max():.2f}")
+                            avg_val = df["value"].mean()
+                            max_val = df["value"].max()
+                            st.metric(label, f"{avg_val:.2f}", delta=f"Max: {max_val:.2f}")
 
-                    # Prepare consistent timestamp range based on user input
+                    # Create consistent time index
                     full_time_index = pd.date_range(
                         start=datetime.fromtimestamp(selected_start),
                         end=datetime.fromtimestamp(selected_end),
@@ -168,19 +188,21 @@ if page == "📈 Analyze Metrics":
                     )
                     chart_df = pd.DataFrame(index=full_time_index)
 
-                    # Add GPU & Latency metrics to the chart
+                    # Populate chart data for selected metrics
                     for label in DASHBOARD_METRICS:
                         df = metric_dfs[label]
                         if not df.empty:
                             df_plot = df[["timestamp", "value"]].set_index("timestamp").rename(columns={"value": label})
                             chart_df = chart_df.join(df_plot, how="left")
 
-                    # Fill missing values with 0
                     chart_df.fillna(0, inplace=True)
 
-                    # Plot line chart
+                    # Plot line chart below metrics
                     if not chart_df.empty:
                         st.line_chart(chart_df)
+
+
+
 
 
 
@@ -224,4 +246,4 @@ User's question: "{user_input}"
 
 # --- Footer ---
 st.markdown("---")
-st.caption("Built with ❤️ by your-team · Powered by Prometheus & LlamaStack")
+st.caption("Built with ❤️ by your-team · Powered by Prometheus & Llama Models")

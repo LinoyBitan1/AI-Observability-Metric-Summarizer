@@ -68,32 +68,6 @@ namespace:
 	@echo "Creating namespace $(NAMESPACE)..."
 	oc create namespace $(NAMESPACE) && oc label namespace $(NAMESPACE) modelmesh-enabled=false || oc project $(NAMESPACE) ||:
 
-.PHONY: secrets
-secrets:
-	@echo "Creating Hugging Face secret..."
-	oc create secret -n $(NAMESPACE) generic huggingface-secret --from-literal=HF_TOKEN="$(HF_TOKEN)" --dry-run=client -o yaml | oc apply -f -
-
-	@echo "Creating pgvector secret"
-	oc create secret -n $(NAMESPACE) generic pgvector \
-		--from-literal=username="$(POSTGRES_USER)" \
-		--from-literal=password="$(POSTGRES_PASSWORD)" \
-		--from-literal=host=pgvector \
-		--from-literal=port=5432 \
-		--from-literal=dbname="$(POSTGRES_DBNAME)" || echo "PGVector secret not created"
-
-	@echo "Creating minio secret"
-	oc create secret -n $(NAMESPACE) generic minio \
-       --from-literal=username=$(MINIO_USER) \
-       --from-literal=password=$(MINIO_PASSWORD) \
-       --from-literal=host=minio \
-       --from-literal=port=9000 || echo "Minio secret not created"
-
-	@echo "Annotating secrets..."
-	oc annotate secret huggingface-secret -n $(NAMESPACE) meta.helm.sh/release-name=$(RELEASE_NAME) meta.helm.sh/release-namespace=$(NAMESPACE) --overwrite
-	oc annotate secret pgvector -n $(NAMESPACE) meta.helm.sh/release-name=rag meta.helm.sh/release-namespace=$(NAMESPACE)
-	oc annotate secret minio -n $(NAMESPACE) meta.helm.sh/release-name=rag meta.helm.sh/release-namespace=$(NAMESPACE)
-	@touch secrets
-
 
 set_ingestion_args = \
 	$(if $(SOURCE),--set source='$(SOURCE)',) \
@@ -114,12 +88,12 @@ helm_llm_service_args = \
     $(if $(LLM_TOLERATION),--set-json models.$(LLM).inferenceService.tolerations='$(call TOLERATIONS_TEMPLATE,$(LLM_TOLERATION))',) \
     $(if $(SAFETY_TOLERATION),--set-json models.$(SAFETY).inferenceService.tolerations='$(call TOLERATIONS_TEMPLATE,$(SAFETY_TOLERATION))',)
 
-install-llm-service-%: namespace secrets
+install-llm-service-%: namespace
 	@$(eval HELM_ARGS := $(call helm_llm_service_args))
 
-	@echo "Deploying Helm chart $(LLM_SERVICE_CHART_PATH) as release $(LLM_SERVICE_RELEASE_NAME) in namespace $(NAMESPACE)..."
+	@echo "Deploying Helm chart $(LLM_SERVICE_CHART_PATH) as release $(LLM_SERVICE_RELEASE_NAME) in namespace $(NAMESPACE)..."; \
 	helm upgrade --install $(LLM_SERVICE_RELEASE_NAME) $(LLM_SERVICE_CHART_PATH) -n $(NAMESPACE) --values $(LLM_SERVICE_CHART_PATH)/values-$*.yaml \
-	$(HELM_ARGS) $(EXTRA_HELM_ARGS)
+		--set hf_token=$(HF_TOKEN) $(HELM_ARGS) $(EXTRA_HELM_ARGS)
 	@echo "Waiting for model services to deploy. It will take around 10-15 minutes depending on the size of the model..."
 	oc wait -n $(NAMESPACE) --for=condition=Ready --timeout=60m inferenceservice --all ||:
 
@@ -127,24 +101,20 @@ install-llm-service-%: namespace secrets
 install-llm-service: install-llm-service-gpu
 
 helm_llama_stack_args = \
+    --set pgvector.secret.user=$(POSTGRES_USER) \
+    --set pgvector.secret.password=$(POSTGRES_PASSWORD) \
+    --set pgvector.secret.dbname=$(POSTGRES_DBNAME) \
+    --set minio.secret.user=$(MINIO_USER) \
+    --set minio.secret.password=$(MINIO_PASSWORD) \
     $(if $(LLM),--set-json llama-stack.models.$(LLM).enabled='true',) \
     $(if $(SAFETY),--set-json llama-stack.models.$(SAFETY).enabled='true',) \
     $(if $(LLM_URL),--set-json llama-stack.models.$(LLM).url='"$(LLM_URL)"',) \
     $(if $(SAFETY_URL),--set-json llama-stack.models.$(SAFETY).url='"$(SAFETY_URL)"',) \
     $(if $(LLM_API_TOKEN),--set-json llama-stack.models.$(LLM).apiToken='"$(LLM_API_TOKEN)"',) \
-    $(if $(SAFETY_API_TOKEN),--set-json llama-stack.models.$(SAFETY).apiToken='"$(SAFETY_API_TOKEN)"',) \
-
-.PHONY: install-prometheus
-install-prometheus: namespace
-	@echo "Deploying Prometheus subscription..."
-	helm upgrade --install $(PROMETHEUS_RELEASE_NAME) $(PROMETHEUS_CHART_PATH) -n $(NAMESPACE)
-
-	@echo "Waiting for Prometheus operator CSV to be Succeeded..."
-	oc wait --for=jsonpath='{.status.phase}'=Succeeded csv -n $(NAMESPACE) -l operators.coreos.com/prometheus.$(NAMESPACE) --timeout=300s || \
-	echo "Timed out waiting for CSV"
+    $(if $(SAFETY_API_TOKEN),--set-json llama-stack.models.$(SAFETY).apiToken='"$(SAFETY_API_TOKEN)"',)
 
 .PHONY: list-models-to-configmap
-list-models-to-configmap:
+list-models-to-configmap: namespace
 	@echo "Generating model ID list from values-gpu.yaml for specified models: $(LLM) $(SAFETY)..."
 
 	@touch tmp-models.json
@@ -165,10 +135,33 @@ list-models-to-configmap:
 	fi
 
 	@echo "tmp-models.json content:" && cat tmp-models.json
+
 	@MODELS_JSON=$$(cat tmp-models.json); \
 	oc create configmap llm-models \
 	  --from-literal=models="$$MODELS_JSON" \
 	  -n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -
+
+	@echo "Waiting for ConfigMap 'llm-models' to exist..."
+	@end=$$(($(date +%s)+60)); \
+	while [ $$(date +%s) -lt $$end ]; do \
+	oc get configmap llm-models -n $(NAMESPACE) >/dev/null 2>&1 && echo "ConfigMap available." && break; \
+	sleep 2; \
+	done || echo "Warning: Timeout waiting for ConfigMap 'llm-models'"
+
+.PHONY: install-prometheus
+install-prometheus: namespace
+	@echo "Deploying Prometheus Helm release..."
+	helm upgrade --install $(PROMETHEUS_RELEASE_NAME) $(PROMETHEUS_CHART_PATH) -n $(NAMESPACE)
+
+	@echo "Waiting for Prometheus operator CSV to be Succeeded..."
+	oc wait --for=jsonpath='{.status.phase}'=Succeeded csv -n $(NAMESPACE) -l operators.coreos.com/prometheus.$(NAMESPACE) --timeout=10m || \
+	echo "Timed out waiting for CSV"
+
+	@echo "Waiting for Prometheus operator controller pod to be Ready..."
+	oc wait --for=condition=Ready pod -n $(NAMESPACE) -l app.kubernetes.io/component=controller --timeout=5m || \
+	echo "Timed out waiting for controller pod"
+
+	sleep 30;
 
 
 .PHONY: install-metric-ui
@@ -182,13 +175,12 @@ install-metric-ui: namespace
 
 
 .PHONY: install-ui
-install-ui: namespace secrets install-prometheus list-models-to-configmap install-metric-ui 
+install-ui: namespace list-models-to-configmap install-prometheus install-metric-ui
 	@$(eval HELM_ARGS := $(call helm_llama_stack_args))
-	@$(MAKE) install-prometheus
 
 	@$(MAKE) install-metric-ui
 	@$(MAKE) status
-    
+
 	@echo "Waiting for deployment to be ready..."
 	@$(MAKE) wait
 
