@@ -18,3 +18,8 @@ config:
 llm:
   url: ""
   apiToken: ""
+
+listModels:
+  modelId:
+    # Can be overridden via --set-json llamaStack.modelConfig.enabledModelIds='["model-id-1","model-id-2"]'
+    enabledModelIds: []

@@ -1,4 +1,4 @@
-# Makefile for RAG Deployment
+# Makefile for AI Metric Summarizer Deployment
 # Replaces the original deploy.sh script with additional uninstall functionality
 
 ifeq ($(NAMESPACE),)
@@ -8,15 +8,6 @@ endif
 endif
 
 # Default values
-POSTGRES_USER ?= postgres
-POSTGRES_PASSWORD ?= rag_password
-POSTGRES_DBNAME ?= rag_blueprint
-MINIO_USER ?= minio_rag_user
-MINIO_PASSWORD ?= minio_rag_password
-RELEASE_NAME ?= rag-ui
-CHART_PATH ?= rag-ui
-LLAMA_STACK_CHART_PATH ?= llama-stack
-LLAMA_STACK_RELEASE_NAME ?= llama-stack
 HF_TOKEN ?= $(shell bash -c 'read -r -p "Enter Hugging Face Token: " HF_TOKEN; echo $$HF_TOKEN')
 LLM_SERVICE_CHART_PATH ?= llm-service
 LLM_SERVICE_RELEASE_NAME ?= llm-service
@@ -25,20 +16,6 @@ METRIC_UI_RELEASE_NAME ?= metric-ui
 PROMETHEUS_CHART_PATH ?= prometheus
 PROMETHEUS_RELEASE_NAME ?= prometheus
 TOLERATIONS_TEMPLATE=[{"key":"$(1)","effect":"NoSchedule","operator":"Exists"}]
-
-#ingestion pipeline configuration
-SOURCE ?= S3
-EMBEDDING_MODEL ?= all-MiniLM-L6-v2
-INGESTION_PIPELINE_NAME ?= demo-rag-vector-db
-INGESTION_PIPELINE_VERSION ?= 1.0
-ACCESS_KEY_ID ?= $(MINIO_USER)
-SECRET_ACCESS_KEY ?= $(MINIO_PASSWORD)
-BUCKET_NAME ?= documents
-ENDPOINT_URL ?= http://minio:9000
-REGION ?= us-east-1
-
-S3_TEMPLATE={"access_key_id":"$(1)","secret_access_key":"$(2)","bucket_name":"$(3)","endpoint_url":"$(4)","region":"$(5)"}
-
 
 # Default target
 .PHONY: help
@@ -68,14 +45,6 @@ namespace:
 	@echo "Creating namespace $(NAMESPACE)..."
 	oc create namespace $(NAMESPACE) && oc label namespace $(NAMESPACE) modelmesh-enabled=false || oc project $(NAMESPACE) ||:
 
-
-set_ingestion_args = \
-	$(if $(SOURCE),--set source='$(SOURCE)',) \
-	$(if $(EMBEDDING_MODEL),--set embedding_model='$(EMBEDDING_MODEL)',) \
-	$(if $(INGESTION_PIPELINE_NAME),--set name='$(INGESTION_PIPELINE_NAME)',) \
-	$(if $(INGESTION_PIPELINE_VERSION),--set version='$(INGESTION_PIPELINE_VERSION)',) \
-    $(if $(SOURCE),--set-json S3='$(call S3_TEMPLATE,$(ACCESS_KEY_ID),$(SECRET_ACCESS_KEY),$(BUCKET_NAME),$(ENDPOINT_URL),$(REGION))',) 
-
 list-models-%:
 	@helm template dummy-release $(LLM_SERVICE_CHART_PATH) --set _debugListModels=true --values $(LLM_SERVICE_CHART_PATH)/values-$*.yaml |grep ^model
 
@@ -100,19 +69,6 @@ install-llm-service-%: namespace
 .PHONY: install-llm-service
 install-llm-service: install-llm-service-gpu
 
-helm_llama_stack_args = \
-    --set pgvector.secret.user=$(POSTGRES_USER) \
-    --set pgvector.secret.password=$(POSTGRES_PASSWORD) \
-    --set pgvector.secret.dbname=$(POSTGRES_DBNAME) \
-    --set minio.secret.user=$(MINIO_USER) \
-    --set minio.secret.password=$(MINIO_PASSWORD) \
-    $(if $(LLM),--set-json llama-stack.models.$(LLM).enabled='true',) \
-    $(if $(SAFETY),--set-json llama-stack.models.$(SAFETY).enabled='true',) \
-    $(if $(LLM_URL),--set-json llama-stack.models.$(LLM).url='"$(LLM_URL)"',) \
-    $(if $(SAFETY_URL),--set-json llama-stack.models.$(SAFETY).url='"$(SAFETY_URL)"',) \
-    $(if $(LLM_API_TOKEN),--set-json llama-stack.models.$(LLM).apiToken='"$(LLM_API_TOKEN)"',) \
-    $(if $(SAFETY_API_TOKEN),--set-json llama-stack.models.$(SAFETY).apiToken='"$(SAFETY_API_TOKEN)"',)
-
 .PHONY: list-models-to-configmap
 list-models-to-configmap: namespace
 	@echo "Generating model ID list from values-gpu.yaml for specified models: $(LLM) $(SAFETY)..."
@@ -136,17 +92,8 @@ list-models-to-configmap: namespace
 
 	@echo "tmp-models.json content:" && cat tmp-models.json
 
-	@MODELS_JSON=$$(cat tmp-models.json); \
-	oc create configmap llm-models \
-	  --from-literal=models="$$MODELS_JSON" \
-	  -n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -
+MODELS_JSON := $(shell cat tmp-models.json)
 
-	@echo "Waiting for ConfigMap 'llm-models' to exist..."
-	@end=$$(($(date +%s)+60)); \
-	while [ $$(date +%s) -lt $$end ]; do \
-	oc get configmap llm-models -n $(NAMESPACE) >/dev/null 2>&1 && echo "ConfigMap available." && break; \
-	sleep 2; \
-	done || echo "Warning: Timeout waiting for ConfigMap 'llm-models'"
 
 .PHONY: install-prometheus
 install-prometheus: namespace
@@ -169,9 +116,11 @@ install-metric-ui: namespace
 	@echo "Extracting LLM service URL"
 	LLM_URL=$$(oc get inferenceservice llama-3-2-3b-instruct -n $(NAMESPACE) -o jsonpath='{.status.url}'); \
 	echo "Detected LLM_URL=$$LLM_URL"; \
+	echo "Detected MODEL_JSON=$$MODELS_JSON"; \
 	helm upgrade --install $(METRIC_UI_RELEASE_NAME) $(METRIC_UI_CHART_PATH) \
 		-n $(NAMESPACE) \
-		--set-json llm.url="\"$$LLM_URL\""
+		--set-json llm.url="\"$$LLM_URL\"" \
+		--set-json listModels.modelId.enabledModelIds='$(MODELS_JSON)'
 
 
 .PHONY: install-ui
@@ -192,13 +141,12 @@ install: install-gpu
 
 # Uninstall the deployment and clean up
 .PHONY: uninstall
-uninstall: uninstall-helm-release uninstall-llm-service remove-secrets remove-pvcs
-
+uninstall: uninstall-helm-release uninstall-llm-service uninstall-prometheus uninstall-metric-ui uninstall-configmap remove-secrets remove-pvcs
 	@echo "Checking for any remaining resources in namespace $(NAMESPACE)..."
 	@echo "If you want to completely remove the namespace, run: oc delete project $(NAMESPACE)"
-
 	@echo "Remaining resources in namespace $(NAMESPACE):"
 	@$(MAKE) status
+
 
 .PHONY: uninstall-llm-service
 uninstall-llm-service:
@@ -206,21 +154,20 @@ uninstall-llm-service:
 	@echo "Uninstalling Helm release $(LLM_SERVICE_RELEASE_NAME) from namespace $(NAMESPACE)..."
 	helm uninstall $(LLM_SERVICE_RELEASE_NAME) -n $(NAMESPACE) || echo "LLM services are not installed or already removed."
 
+.PHONY: uninstall-prometheus
+uninstall-prometheus:
+	@echo "Uninstalling Prometheus Helm release..."
+	helm uninstall $(PROMETHEUS_RELEASE_NAME) -n $(NAMESPACE) || echo "Prometheus not installed or already removed."
 
-.PHONY: uninstall-mcp-servers
-uninstall-mcp-servers:
+.PHONY: uninstall-metric-ui
+uninstall-metric-ui:
+	@echo "Uninstalling Metric UI Helm release..."
+	helm uninstall $(METRIC_UI_RELEASE_NAME) -n $(NAMESPACE) || echo "Metric UI not installed or already removed."
 
-	@echo "Uninstalling Helm release $(MCP_SERVERS_RELEASE_NAME) from namespace $(NAMESPACE)..."
-	helm uninstall $(MCP_SERVERS_RELEASE_NAME) -n $(NAMESPACE) || echo "MCP servers are not installed or already removed."
-
-.PHONY: uninstall-ingestion-pipeline
-uninstall-ingestion-pipeline:
-
-	@echo "Uninstalling Helm release $(INGESTION_PIPELINE_RELEASE_NAME) from namespace $(NAMESPACE)..."
-	helm uninstall $(INGESTION_PIPELINE_RELEASE_NAME) -n $(NAMESPACE) || echo "Pipelines are not installed or already removed."
-
-	@echo "Uninstalling Helm release $(CONFIGURE_PIPELINE_SERVER_RELEASE_NAME) from namespace $(NAMESPACE)..."
-	helm uninstall $(CONFIGURE_PIPELINE_SERVER_RELEASE_NAME) -n $(NAMESPACE) || echo "Pipeline is not configured or already removed."
+.PHONY: uninstall-configmap
+uninstall-configmap:
+	@echo "Deleting 'llm-models' ConfigMap..."
+	oc delete configmap llm-models -n $(NAMESPACE) || echo "ConfigMap not found or already removed."
 
 
 .PHONY: uninstall-helm-release
@@ -229,21 +176,6 @@ uninstall-helm-release:
 	@echo "Uninstalling Helm release $(RELEASE_NAME) from namespace $(NAMESPACE)..."
 	helm uninstall $(RELEASE_NAME) -n $(NAMESPACE) || echo "Helm release not found or already removed."
 
-.PHONY: remove-secrets
-remove-secrets:
-
-	@echo "Removing Hugging Face secret..."
-	oc delete secret -n $(NAMESPACE) huggingface-secret || echo "Secret not found or already removed."
-
-	@echo "Removing pgvector secret"
-	oc delete secret -n $(NAMESPACE) pgvector || echo "Secret not found or already removed."
-
-	@echo "Removing minio secret"
-	oc delete secret -n $(NAMESPACE) minio || echo "Secret not found or already removed."
-
-	@echo "Removing pipeline secret"
-	oc delete secret -n $(NAMESPACE) rag-pipeline-secrets || echo "Secret not found or already removed."
-	rm -f secrets namespace
 
 .PHONY: remove-pvcs
 remove-pvcs:
