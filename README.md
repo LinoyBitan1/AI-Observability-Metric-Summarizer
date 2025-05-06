@@ -39,7 +39,11 @@ It helps teams **understand what’s going well, what’s going wrong**, and rec
 Use the included `Makefile` to install everything:
 
 ```bash
-make install NAMESPACE=llama-namespace \
+cd deploy/helm
+```
+
+```bash
+make install NAMESPACE=llama-stack-summarizer \
   LLM=llama-3-2-3b-instruct \
   LLM_TOLERATION="nvidia.com/gpu" \
   SAFETY=llama-guard-3-8b \
