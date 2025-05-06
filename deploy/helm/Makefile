@@ -73,26 +73,22 @@ install-llm-service: install-llm-service-gpu
 list-models-to-configmap: namespace
 	@echo "Generating model ID list from values-gpu.yaml for specified models: $(LLM) $(SAFETY)..."
 
-	@touch tmp-models.json
-	@echo "[]" > tmp-models.json
-
-	@if [ -n "$(LLM)" ]; then \
-		id=$$(yq e '.models.$(LLM).id' $(LLM_SERVICE_CHART_PATH)/values-gpu.yaml); \
-		if [ "$$id" != "null" ]; then \
-			jq --arg id "$$id" '. + [$$id]' tmp-models.json > tmp-models.json.new && mv tmp-models.json.new tmp-models.json; \
-		fi; \
-	fi
-
-	@if [ -n "$(SAFETY)" ]; then \
-		id=$$(yq e '.models.$(SAFETY).id' $(LLM_SERVICE_CHART_PATH)/values-gpu.yaml); \
-		if [ "$$id" != "null" ]; then \
-			jq --arg id "$$id" '. + [$$id]' tmp-models.json > tmp-models.json.new && mv tmp-models.json.new tmp-models.json; \
-		fi; \
-	fi
-
-	@echo "tmp-models.json content:" && cat tmp-models.json
-
-MODELS_JSON := $(shell cat tmp-models.json)
+MODELS_JSON := $(shell \
+  ids="[]"; \
+  if [ -n "$(LLM)" ]; then \
+    id=$$(yq e '.models.$(LLM).id' $(LLM_SERVICE_CHART_PATH)/values-gpu.yaml); \
+    if [ "$$id" != "null" ]; then \
+      ids=$$(echo $$ids | jq --arg id "$$id" '. + [$$id]'); \
+    fi; \
+  fi; \
+  if [ -n "$(SAFETY)" ]; then \
+    id=$$(yq e '.models.$(SAFETY).id' $(LLM_SERVICE_CHART_PATH)/values-gpu.yaml); \
+    if [ "$$id" != "null" ]; then \
+      ids=$$(echo $$ids | jq --arg id "$$id" '. + [$$id]'); \
+    fi; \
+  fi; \
+  echo $$ids \
+)
 
 
 .PHONY: install-prometheus
