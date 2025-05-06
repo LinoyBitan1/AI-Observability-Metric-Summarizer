@@ -64,7 +64,7 @@ This will:
 
 To uninstall:
 ```bash
-make uninstall NAMESPACE=llama-namespace
+make uninstall NAMESPACE=llama-stack-summarizer
 ```
 
 ---
