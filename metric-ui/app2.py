@@ -14,7 +14,6 @@ LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"
 model_list_json = os.getenv("LLM_MODELS", '["Unknown"]')
 model_names = json.loads(model_list_json)
 
-
 ALL_METRICS = {
     "Prompt Tokens Created": "vllm:prompt_tokens_created",
     "P95 Latency (s)": "vllm:e2e_request_latency_seconds_count",
@@ -173,12 +172,17 @@ if page == "📈 Analyze Metrics":
                     st.subheader("GPU & Latency Trends")
 
                     # Metric cards for all metrics
+                    # Metric cards for all metrics
                     for label in ALL_METRICS:
                         df = metric_dfs[label]
-                        if not df.empty:
+                        if df.empty:
+                            avg_val = 0
+                            max_val = 0
+                        else:
                             avg_val = df["value"].mean()
                             max_val = df["value"].max()
-                            st.metric(label, f"{avg_val:.2f}", delta=f"Max: {max_val:.2f}")
+                        st.metric(label, f"{avg_val:.2f}", delta=f"Max: {max_val:.2f}")
+
 
                     # Create consistent time index
                     full_time_index = pd.date_range(
@@ -189,13 +193,17 @@ if page == "📈 Analyze Metrics":
                     chart_df = pd.DataFrame(index=full_time_index)
 
                     # Populate chart data for selected metrics
+                    # Populate chart data for selected metrics, filling empty ones with 0s
                     for label in DASHBOARD_METRICS:
                         df = metric_dfs[label]
-                        if not df.empty:
+                        if df.empty:
+                            chart_df[label] = 0  # Flat 0 line
+                        else:
                             df_plot = df[["timestamp", "value"]].set_index("timestamp").rename(columns={"value": label})
                             chart_df = chart_df.join(df_plot, how="left")
 
                     chart_df.fillna(0, inplace=True)
+
 
                     # Plot line chart below metrics
                     if not chart_df.empty:
