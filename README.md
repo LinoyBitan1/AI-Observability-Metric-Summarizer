@@ -58,10 +58,6 @@ This will:
 4. Create a ConfigMap with available models  
 5. Deploy the Streamlit dashboard connected to the LLM  
 
-![UI](docs/img/UI-dash-1.png)
-
-![UI-1](docs/img/UI-dash-2.png)
-
 Navigate to your **Openshift Cluster --> Networking --> Route** and you should be able to see the route for your application.
 
 On terminal you can access the route with -
@@ -72,6 +68,11 @@ On terminal you can access the route with -
 NAME              HOST/PORT                                                               PATH   SERVICES        PORT   TERMINATION     WILDCARD
 metric-ui-route   metric-ui-route-llama-1.apps.tsisodia-spark.2vn8.p1.openshiftapps.com          metric-ui-svc   8501   edge/Redirect   None
 ```
+
+![UI](docs/img/UI-dash-1.png)
+
+![UI-1](docs/img/UI-dash-2.png)
+
 
 To uninstall:
 ```bash
