@@ -39,11 +39,11 @@ It helps teams **understand what’s going well, what’s going wrong**, and rec
 Use the included `Makefile` to install everything:
 
 ```bash
-> cd deploy/helm
+cd deploy/helm
 ```
 
 ```bash
-> make install NAMESPACE=llama-stack-summarizer \
+make install NAMESPACE=llama-stack-summarizer \
   LLM=llama-3-2-3b-instruct \
   LLM_TOLERATION="nvidia.com/gpu" \
   SAFETY=llama-guard-3-8b \
@@ -63,7 +63,7 @@ Navigate to your **Openshift Cluster --> Networking --> Route** and you should b
 On terminal you can access the route with -
 
 ```bash
-> oc get route
+oc get route
 
 NAME              HOST/PORT                                                               PATH   SERVICES        PORT   TERMINATION     WILDCARD
 metric-ui-route   metric-ui-route-llama-1.apps.tsisodia-spark.2vn8.p1.openshiftapps.com          metric-ui-svc   8501   edge/Redirect   None
@@ -76,7 +76,7 @@ metric-ui-route   metric-ui-route-llama-1.apps.tsisodia-spark.2vn8.p1.openshifta
 
 To uninstall:
 ```bash
-> make uninstall NAMESPACE=llama-stack-summarizer
+make uninstall NAMESPACE=llama-stack-summarizer
 ```
 
 ---
