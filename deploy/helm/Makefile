@@ -98,7 +98,8 @@ MODELS_JSON := $(shell cat tmp-models.json)
 .PHONY: install-prometheus
 install-prometheus: namespace
 	@echo "Deploying Prometheus Helm release..."
-	helm upgrade --install $(PROMETHEUS_RELEASE_NAME) $(PROMETHEUS_CHART_PATH) -n $(NAMESPACE)
+	helm upgrade --install $(PROMETHEUS_RELEASE_NAME) $(PROMETHEUS_CHART_PATH) -n $(NAMESPACE) \
+	   --set-json listModels.modelId.enabledModelIds='$(MODELS_JSON)'
 
 	@echo "Waiting for Prometheus operator CSV to be Succeeded..."
 	oc wait --for=jsonpath='{.status.phase}'=Succeeded csv -n $(NAMESPACE) -l operators.coreos.com/prometheus.$(NAMESPACE) --timeout=10m || \
@@ -126,9 +127,6 @@ install-metric-ui: namespace
 .PHONY: install-ui
 install-ui: namespace list-models-to-configmap install-prometheus install-metric-ui
 	@$(eval HELM_ARGS := $(call helm_llama_stack_args))
-
-	@$(MAKE) install-metric-ui
-	@$(MAKE) status
 
 	@echo "Waiting for deployment to be ready..."
 	@$(MAKE) wait

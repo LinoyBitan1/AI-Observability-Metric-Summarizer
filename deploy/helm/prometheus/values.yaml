@@ -1,3 +1,8 @@
+listModels:
+  modelId:
+    # Can be overridden via --set-json llamaStack.modelConfig.enabledModelIds='["model-id-1","model-id-2"]'
+    enabledModelIds: []
+
 # kube-prometheus-stack:
 #   nameOverride: prometheus
 
