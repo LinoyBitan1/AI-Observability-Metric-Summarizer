@@ -209,7 +209,7 @@ wait:
 	@echo "Waiting for all pods to be ready in namespace $(NAMESPACE)..."
 	@end=$$(($$(date +%s)+60)); \
 	while [ $$(date +%s) -lt $$end ]; do \
-	  not_ready=$$(kubectl get pods --no-headers | grep -vE 'Running|Succeeded|Completed'); \
+	  not_ready=$$(oc get pods --no-headers | grep -vE 'Running|Succeeded|Completed'); \
 	  if [ -z "$$not_ready" ]; then \
 	    echo "All pods are Ready or Completed."; \
 		break; \
