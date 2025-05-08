@@ -29,8 +29,9 @@ It helps teams **understand what’s going well, what’s going wrong**, and rec
 
 ## Prerequisites
 
-- Kubernetes or OpenShift cluster
-- `oc` or `kubectl` CLI configured
+- OpenShift cluster
+- `oc` CLI configured
+- Installed `yq`
 
 ---
 
@@ -39,21 +40,27 @@ It helps teams **understand what’s going well, what’s going wrong**, and rec
 Use the included `Makefile` to install everything:
 
 ```bash
-cd deploy/helm
+brew install yq
 ```
 
 ```bash
-make install NAMESPACE=llama-stack-summarizer \
-  LLM=llama-3-2-3b-instruct \
-  LLM_TOLERATION="nvidia.com/gpu" \
-  SAFETY=llama-guard-3-8b \
-  SAFETY_TOLERATION="nvidia.com/gpu"
+cd deploy/helm
+```
+
+If you want single model deployment -
+```bash
+make install NAMESPACE=metric-summarizer LLM=llama-3-2-3b-instruct LLM_TOLERATION="nvidia.com/gpu" 
+```
+
+If you want multiple model deployments - 
+```bash
+make install NAMESPACE=llama-stack-summarizer LLM=llama-3-2-3b-instruct LLM_TOLERATION="nvidia.com/gpu" SAFETY=llama-guard-3-8b SAFETY_TOLERATION="nvidia.com/gpu"
 ```
 
 This will:
 
 1. Deploy Prometheus  
-2. Deploy Llama models 
+2. Deploy Llama models - single or multiple models
 3. Extract their URLs  
 4. Create a ConfigMap with available models  
 5. Deploy the Streamlit dashboard connected to the LLM  
@@ -76,7 +83,7 @@ metric-ui-route   metric-ui-route-llama-1.apps.tsisodia-spark.2vn8.p1.openshifta
 
 To uninstall:
 ```bash
-make uninstall NAMESPACE=llama-stack-summarizer
+make uninstall NAMESPACE=metric-summarizer
 ```
 
 ---
