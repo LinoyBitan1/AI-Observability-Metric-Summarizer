@@ -8,13 +8,13 @@ models:
     inferenceService:
       resources: {}
       args:
-      - --enable-auto-tool-choice
-      - --chat-template
-      - /workspace/vllm/examples/tool_chat_template_llama3.2_json.jinja
-      - --tool-call-parser
-      - llama3_json
-      - --max-model-len
-      - "30544"
+        - --enable-auto-tool-choice
+        - --chat-template
+        - /workspace/vllm/examples/tool_chat_template_llama3.2_json.jinja
+        - --tool-call-parser
+        - llama3_json
+        - --max-model-len
+        - "30544"
 
   llama-guard-3-1b:
     id: meta-llama/Llama-Guard-3-1B
@@ -22,5 +22,5 @@ models:
     inferenceService:
       resources: {}
       args:
-      - --max-model-len
-      - "14336"
+        - --max-model-len
+        - "14336"

@@ -1,21 +1,24 @@
-# Makefile for AI Metric Summarizer Deployment
+# Makefile for RAG Deployment
 # Replaces the original deploy.sh script with additional uninstall functionality
-
 ifeq ($(NAMESPACE),)
 ifeq (,$(filter list-models% help,$(MAKECMDGOALS)))
 $(error NAMESPACE is not set)
 endif
 endif
 
+MAKEFLAGS += --no-print-directory
+
 # Default values
 HF_TOKEN ?= $(shell bash -c 'read -r -p "Enter Hugging Face Token: " HF_TOKEN; echo $$HF_TOKEN')
-LLM_SERVICE_CHART_PATH ?= llm-service
-LLM_SERVICE_RELEASE_NAME ?= llm-service
+LLM_SERVICE_CHART := llm-service
+COMPONENTS := $(LLM_SERVICE_CHART) $(METRIC_UI_CHART_PATH) $(PROMETHEUS_CHART_PATH)
+TOLERATIONS_TEMPLATE=[{"key":"$(1)","effect":"NoSchedule","operator":"Exists"}]
 METRIC_UI_CHART_PATH ?= metric-ui
 METRIC_UI_RELEASE_NAME ?= metric-ui
 PROMETHEUS_CHART_PATH ?= prometheus
 PROMETHEUS_RELEASE_NAME ?= prometheus
-TOLERATIONS_TEMPLATE=[{"key":"$(1)","effect":"NoSchedule","operator":"Exists"}]
+
+REGION ?= us-east-1
 
 # Default target
 .PHONY: help
@@ -31,8 +34,6 @@ help:
 	@echo ""
 	@echo "Configuration options (set via environment variables or make arguments):"
 	@echo "  NAMESPACE                - Target namespace (default: llama-stack-rag)"
-	@echo "  RELEASE_NAME             - Helm release name (default: rag)"
-	@echo "  CHART_PATH               - Path to the Helm chart (default: rag-ui)"
 	@echo "  HF_TOKEN                 - Hugging Face Token (will prompt if not provided)"
 	@echo "  {SAFETY,LLM}             - Model id as defined in values (eg. llama-3-2-1b-instruct)"
 	@echo "  {SAFETY,LLM}_URL         - Model URL"
@@ -40,34 +41,41 @@ help:
 	@echo "  {SAFETY,LLM}_TOLERATION  - Model pod toleration"
 
 # Create namespace and deploy
-.PHONY: namespace
 namespace:
-	@echo "Creating namespace $(NAMESPACE)..."
-	oc create namespace $(NAMESPACE) && oc label namespace $(NAMESPACE) modelmesh-enabled=false || oc project $(NAMESPACE) ||:
+	@oc create namespace $(NAMESPACE) &> /dev/null && oc label namespace $(NAMESPACE) modelmesh-enabled=false ||:
+	@oc project $(NAMESPACE) &> /dev/null ||:
+
+helm-install-%: namespace
+	$(if $(HELM_ARGS_FUNC), $(eval HELM_ARGS := $(call $(HELM_ARGS_FUNC))))
+	@echo "$*: Deploying Helm chart in namespace $(NAMESPACE)..."
+	@helm upgrade --install $* ./$* -n $(NAMESPACE) $(HELM_ARGS) $(EXTRA_HELM_ARGS) > /dev/null && echo "$*: Helm chart installed successfully"
+
+helm-uninstall-%:
+	@echo "$*: Uninstalling Helm chart from namespace $(NAMESPACE)..."
+	@helm uninstall $* -n $(NAMESPACE) &> /dev/null || echo "$* is not installed or already removed."
 
 list-models-%:
-	@helm template dummy-release $(LLM_SERVICE_CHART_PATH) --set _debugListModels=true --values $(LLM_SERVICE_CHART_PATH)/values-$*.yaml |grep ^model
+	@helm template dummy-release $(LLM_SERVICE_CHART) --set _debugListModels=true --values $(LLM_SERVICE_CHART)/values-$*.yaml |grep ^model
 
 .PHONY: list-models
 list-models: list-models-gpu
 
+
 helm_llm_service_args = \
-    $(if $(LLM),--set-json models.$(LLM).enabled='true',) \
-    $(if $(SAFETY),--set-json models.$(SAFETY).enabled='true',) \
+    --set secret.hf_token=$(HF_TOKEN) \
+    $(if $(LLM),--set models.$(LLM).enabled=true,) \
+    $(if $(SAFETY),--set models.$(SAFETY).enabled=true,) \
     $(if $(LLM_TOLERATION),--set-json models.$(LLM).inferenceService.tolerations='$(call TOLERATIONS_TEMPLATE,$(LLM_TOLERATION))',) \
     $(if $(SAFETY_TOLERATION),--set-json models.$(SAFETY).inferenceService.tolerations='$(call TOLERATIONS_TEMPLATE,$(SAFETY_TOLERATION))',)
 
 install-llm-service-%: namespace
-	@$(eval HELM_ARGS := $(call helm_llm_service_args))
-
-	@echo "Deploying Helm chart $(LLM_SERVICE_CHART_PATH) as release $(LLM_SERVICE_RELEASE_NAME) in namespace $(NAMESPACE)..."; \
-	helm upgrade --install $(LLM_SERVICE_RELEASE_NAME) $(LLM_SERVICE_CHART_PATH) -n $(NAMESPACE) --values $(LLM_SERVICE_CHART_PATH)/values-$*.yaml \
-		--set hf_token=$(HF_TOKEN) $(HELM_ARGS) $(EXTRA_HELM_ARGS)
+	@$(MAKE) helm-install-$(LLM_SERVICE_CHART) HELM_ARGS_FUNC=helm_llm_service_args EXTRA_HELM_ARGS="--values=$(LLM_SERVICE_CHART)/values-$*.yaml "
 	@echo "Waiting for model services to deploy. It will take around 10-15 minutes depending on the size of the model..."
-	oc wait -n $(NAMESPACE) --for=condition=Ready --timeout=60m inferenceservice --all ||:
+	@oc wait -n $(NAMESPACE) --for=condition=Ready --timeout=60m inferenceservice --all ||:
 
 .PHONY: install-llm-service
 install-llm-service: install-llm-service-gpu
+
 
 .PHONY: list-models-to-configmap
 list-models-to-configmap: namespace
@@ -76,13 +84,13 @@ list-models-to-configmap: namespace
 MODELS_JSON := $(shell \
   ids="[]"; \
   if [ -n "$(LLM)" ]; then \
-    id=$$(yq e '.models.$(LLM).id' $(LLM_SERVICE_CHART_PATH)/values-gpu.yaml); \
+    id=$$(yq e '.models.$(LLM).id' $(LLM_SERVICE_CHART)/values-gpu.yaml); \
     if [ "$$id" != "null" ]; then \
       ids=$$(echo $$ids | jq --arg id "$$id" '. + [$$id]'); \
     fi; \
   fi; \
   if [ -n "$(SAFETY)" ]; then \
-    id=$$(yq e '.models.$(SAFETY).id' $(LLM_SERVICE_CHART_PATH)/values-gpu.yaml); \
+    id=$$(yq e '.models.$(SAFETY).id' $(LLM_SERVICE_CHART)/values-gpu.yaml); \
     if [ "$$id" != "null" ]; then \
       ids=$$(echo $$ids | jq --arg id "$$id" '. + [$$id]'); \
     fi; \
@@ -127,56 +135,27 @@ install-ui: namespace list-models-to-configmap install-prometheus install-metric
 	@echo "Waiting for deployment to be ready..."
 	@$(MAKE) wait
 
-install-%: install-llm-service-% install-ui
-	@echo "Installed from target install-$*"
+install-gpu: install-llm-service-gpu install-ui
+install-cpu: install-llm-service-cpu install-ui
 
 .PHONY: install
 install: install-gpu
 
 # Uninstall the deployment and clean up
 .PHONY: uninstall
-uninstall: uninstall-helm-release uninstall-llm-service uninstall-prometheus uninstall-metric-ui uninstall-configmap remove-secrets remove-pvcs
+uninstall: $(addprefix helm-uninstall-,$(COMPONENTS)) remove-pvcs
+	@echo "Deleting remaining pods in namespace $(NAMESPACE)"
+	@oc delete pods -n $(NAMESPACE) --all
 	@echo "Checking for any remaining resources in namespace $(NAMESPACE)..."
 	@echo "If you want to completely remove the namespace, run: oc delete project $(NAMESPACE)"
 	@echo "Remaining resources in namespace $(NAMESPACE):"
 	@$(MAKE) status
 
 
-.PHONY: uninstall-llm-service
-uninstall-llm-service:
-
-	@echo "Uninstalling Helm release $(LLM_SERVICE_RELEASE_NAME) from namespace $(NAMESPACE)..."
-	helm uninstall $(LLM_SERVICE_RELEASE_NAME) -n $(NAMESPACE) || echo "LLM services are not installed or already removed."
-
-.PHONY: uninstall-prometheus
-uninstall-prometheus:
-	@echo "Uninstalling Prometheus Helm release..."
-	helm uninstall $(PROMETHEUS_RELEASE_NAME) -n $(NAMESPACE) || echo "Prometheus not installed or already removed."
-
-.PHONY: uninstall-metric-ui
-uninstall-metric-ui:
-	@echo "Uninstalling Metric UI Helm release..."
-	helm uninstall $(METRIC_UI_RELEASE_NAME) -n $(NAMESPACE) || echo "Metric UI not installed or already removed."
-
-.PHONY: uninstall-configmap
-uninstall-configmap:
-	@echo "Deleting 'llm-models' ConfigMap..."
-	oc delete configmap llm-models -n $(NAMESPACE) || echo "ConfigMap not found or already removed."
-
-
-.PHONY: uninstall-helm-release
-uninstall-helm-release:
-
-	@echo "Uninstalling Helm release $(RELEASE_NAME) from namespace $(NAMESPACE)..."
-	helm uninstall $(RELEASE_NAME) -n $(NAMESPACE) || echo "Helm release not found or already removed."
-
-
 .PHONY: remove-pvcs
 remove-pvcs:
-
 	@echo "Removing pgvector and minio PVCs"
-	oc delete pvc -n $(NAMESPACE) $$(oc get pvc -n $(NAMESPACE) -o custom-columns=NAME:.metadata.name --no-headers | grep "^pg-data")
-	oc delete pvc -n $(NAMESPACE) $$(oc get pvc -n $(NAMESPACE) -o custom-columns=NAME:.metadata.name --no-headers | grep "^minio-data")
+	@oc get pvc -n $(NAMESPACE) -o custom-columns=NAME:.metadata.name | grep -E '^(pg|minio)-data' | xargs -I {} oc delete pvc -n $(NAMESPACE) {} ||:
 
 # Check deployment status
 .PHONY: status
@@ -209,7 +188,7 @@ wait:
 	@echo "Waiting for all pods to be ready in namespace $(NAMESPACE)..."
 	@end=$$(($$(date +%s)+60)); \
 	while [ $$(date +%s) -lt $$end ]; do \
-	  not_ready=$$(oc get pods --no-headers | grep -vE 'Running|Succeeded|Completed'); \
+	  not_ready=$$(kubectl get pods --no-headers | grep -vE 'Running|Succeeded|Completed'); \
 	  if [ -z "$$not_ready" ]; then \
 	    echo "All pods are Ready or Completed."; \
 		break; \
