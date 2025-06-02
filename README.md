@@ -76,9 +76,7 @@ NAME              HOST/PORT                                                     
 metric-ui-route   metric-ui-route-llama-1.apps.tsisodia-spark.2vn8.p1.openshiftapps.com          metric-ui-svc   8501   edge/Redirect   None
 ```
 
-![UI](docs/img/UI-dash-1.png)
-
-![UI-1](docs/img/UI-dash-2.png)
+![UI](docs/img/ui-1.png)
 
 
 To uninstall:
