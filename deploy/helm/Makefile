@@ -13,8 +13,10 @@ HF_TOKEN ?= $(shell bash -c 'read -r -p "Enter Hugging Face Token: " HF_TOKEN; e
 LLM_SERVICE_CHART := llm-service
 COMPONENTS := $(LLM_SERVICE_CHART) $(METRIC_UI_CHART_PATH) $(PROMETHEUS_CHART_PATH)
 TOLERATIONS_TEMPLATE=[{"key":"$(1)","effect":"NoSchedule","operator":"Exists"}]
-METRIC_UI_CHART_PATH ?= metric-ui
-METRIC_UI_RELEASE_NAME ?= metric-ui
+METRIC_MCP_CHART_PATH ?= metric-mcp
+METRIC_MCP_RELEASE_NAME ?= metric-mcp
+METRIC_UI_CHART_PATH ?= ui
+METRIC_UI_RELEASE_NAME ?= ui
 PROMETHEUS_CHART_PATH ?= prometheus
 PROMETHEUS_RELEASE_NAME ?= prometheus
 
@@ -116,20 +118,25 @@ install-prometheus: namespace
 	sleep 30;
 
 
-.PHONY: install-metric-ui
-install-metric-ui: namespace
+.PHONY: install-metric-mcp
+install-metric-mcp: namespace
 	@echo "Extracting LLM service URL"
 	LLM_URL=$$(oc get inferenceservice llama-3-2-3b-instruct -n $(NAMESPACE) -o jsonpath='{.status.url}'); \
 	echo "Detected LLM_URL=$$LLM_URL"; \
 	echo "Detected MODEL_JSON=$$MODELS_JSON"; \
-	helm upgrade --install $(METRIC_UI_RELEASE_NAME) $(METRIC_UI_CHART_PATH) \
+	helm upgrade --install $(METRIC_MCP_RELEASE_NAME) $(METRIC_MCP_CHART_PATH) \
 		-n $(NAMESPACE) \
 		--set-json llm.url="\"$$LLM_URL\"" \
 		--set-json listModels.modelId.enabledModelIds='$(MODELS_JSON)'
 
+.PHONY: install-metric-ui
+install-metric-ui: namespace
+	@echo "Deploying Metric UI"
+
+	helm upgrade --install $(METRIC_UI_RELEASE_NAME) $(METRIC_UI_CHART_PATH) -n $(NAMESPACE)
 
 .PHONY: install-ui
-install-ui: namespace list-models-to-configmap install-prometheus install-metric-ui
+install-ui: namespace list-models-to-configmap install-prometheus install-metric-mcp install-metric-ui
 	@$(eval HELM_ARGS := $(call helm_llama_stack_args))
 
 	@echo "Waiting for deployment to be ready..."

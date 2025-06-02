@@ -12,33 +12,35 @@ spec:
       labels:
         app: {{ .Release.Name }}-app
     spec:
+      serviceAccountName: metric-analyzer
       containers:
         - name: streamlit-app
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           ports:
-            - containerPort: 8501
+            - containerPort: 8000
           env:
             - name: PROMETHEUS_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Release.Name }}-config
-                  key: PROMETHEUS_URL
+              value: "{{ .Values.config.prometheusUrl }}"
             - name: LLM_URL
               value: "{{ .Values.llm.url }}"  
             - name: LLM_API_TOKEN
               value: "{{ .Values.llm.apiToken }}"  
-            - name: LLM_MODELS
-              valueFrom:
-                configMapKeyRef:
-                  name: llm-models
-                  key: models      
-            # - name: DEEPINFRA_MODEL
+            # - name: LLM_MODELS
             #   valueFrom:
             #     configMapKeyRef:
-            #       name: {{ .Release.Name }}-config
-            #       key: DEEPINFRA_MODEL
-            # - name: DEEPINFRA_API_KEY
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: {{ .Release.Name }}-secrets
-            #       key: DEEPINFRA_API_KEY
+            #       name: llm-models
+            #       key: models
+            - name: THANOS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: metric-analyzer
+                  key: token
+          volumeMounts:
+            - name: thanos-token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      volumes:
+        - name: thanos-token
+          secret:
+            secretName: metric-analyzer
+            defaultMode: 0440      

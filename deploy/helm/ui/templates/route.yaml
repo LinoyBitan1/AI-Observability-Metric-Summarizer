@@ -5,7 +5,7 @@ metadata:
 spec:
   to:
     kind: Service
-    name: {{ .Release.Name }}-svc
+    name: ui
     weight: 100
   port:
     targetPort: 8501
@@ -13,4 +13,3 @@ spec:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
   wildcardPolicy: None
-  alternateBackends: []

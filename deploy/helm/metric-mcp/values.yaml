@@ -1,0 +1,20 @@
+replicaCount: 1
+
+image:
+  repository: quay.io/ecosystem-appeng/metric-mcp
+  tag: 0.1
+
+service:
+  type: ClusterIP
+  port: 8000
+
+route:
+  enabled: true
+  host: ai-metrics-summarizer.example.com
+
+config:
+  prometheusUrl: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
+
+llm:
+  url: ""
+  apiToken: ""

@@ -1,5 +1,5 @@
 apiVersion: v2
-name: metric-ui
+name: metric-mcp
 description: A Helm chart for AI Model Metrics UI
 type: application
 version: 0.1.0
