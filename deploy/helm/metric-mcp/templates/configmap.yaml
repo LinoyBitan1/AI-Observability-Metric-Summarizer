@@ -1,6 +1,8 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ .Release.Name }}-config
+  name: trusted-ca-bundle
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
 data:
-  PROMETHEUS_URL: "https://172.30.106.173:9091"
+  service-ca.crt: "" 

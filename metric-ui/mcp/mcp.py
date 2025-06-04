@@ -8,13 +8,25 @@ import os
 
 app = FastAPI()
 
-# --- Config ---
+# --- CONFIG ---
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
-LLM_URL = os.getenv("LLM_URL", "http://localhost:8012")
+LLM_URL = os.getenv("LLM_URL", "http://localhost:8080")
 LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
 LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"
-THANOS_TOKEN = os.getenv("THANOS_TOKEN", "")
 
+# Handle token input from volume or literal
+token_input = os.getenv("THANOS_TOKEN", "/var/run/secrets/kubernetes.io/serviceaccount/token")
+if os.path.exists(token_input):
+    with open(token_input, "r") as f:
+        THANOS_TOKEN = f.read().strip()
+else:
+    THANOS_TOKEN = token_input
+
+# CA bundle location (mounted via ConfigMap)
+CA_BUNDLE_PATH = "/etc/pki/ca-trust/extracted/pem/ca-bundle.crt"
+verify = CA_BUNDLE_PATH if os.path.exists(CA_BUNDLE_PATH) else True
+
+# --- Metric Queries ---
 ALL_METRICS = {
     "Prompt Tokens Created": "vllm:request_prompt_tokens_created",
     "P95 Latency (s)": "vllm:e2e_request_latency_seconds_count",
@@ -48,13 +60,8 @@ def fetch_metrics(query, model_name, start, end):
     response = requests.get(
         f"{PROMETHEUS_URL}/api/v1/query_range",
         headers=headers,
-        params={
-            "query": promql_query,
-            "start": start,
-            "end": end,
-            "step": "30s"
-        },
-        verify=False
+        params={"query": promql_query, "start": start, "end": end, "step": "30s"},
+        verify=verify
     )
     response.raise_for_status()
     result = response.json()["data"]["result"]
@@ -178,35 +185,47 @@ def summarize_with_llm(prompt: str) -> str:
         "temperature": 0.5,
         "max_tokens": 600
     }
-    response = requests.post(f"{LLM_URL}/v1/completions", headers=headers, json=payload, verify=False)
+    response = requests.post(f"{LLM_URL}/v1/completions", headers=headers, json=payload, verify=verify)
     response.raise_for_status()
-    return response.json()["choices"][0]["text"].strip()
+    response_json = response.json()
+    if "choices" not in response_json or not response_json["choices"]:
+        raise ValueError("Invalid LLM response format")
+    return response_json["choices"][0]["text"].strip()
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.get("/models")
 def list_models():
-    headers = {"Authorization": f"Bearer {THANOS_TOKEN}"}
-    response = requests.get(
-        f"{PROMETHEUS_URL}/api/v1/series",
-        headers=headers,
-        params={
-            "match[]": 'vllm:request_prompt_tokens_created',
-            "start": int((datetime.now().timestamp()) - 3600),
-            "end": int(datetime.now().timestamp())
-        },
-        verify=False
-    )
-    response.raise_for_status()
-    series = response.json()["data"]
+    try:
+        headers = {"Authorization": f"Bearer {THANOS_TOKEN}"}
+        response = requests.get(
+            f"{PROMETHEUS_URL}/api/v1/series",
+            headers=headers,
+            params={
+                "match[]": 'vllm:request_prompt_tokens_created',
+                "start": int((datetime.now().timestamp()) - 3600),
+                "end": int(datetime.now().timestamp())
+            },
+            verify=verify
+        )
+        response.raise_for_status()
+        series = response.json()["data"]
 
-    model_set = set()
-    for entry in series:
-        model = entry.get("model_name")
-        namespace = entry.get("namespace")
-        if model and namespace:
-            model_set.add(f"{namespace.strip()} | {model.strip()}")
-    return sorted(model_set)
+        model_set = set()
+        for entry in series:
+            model = entry.get("model_name", "").strip()
+            namespace = entry.get("namespace", "").strip()
+            if model and namespace:
+                model_set.add(f"{namespace} | {model}")
+        return sorted(model_set)
 
-# --- API Endpoints ---
+    except Exception as e:
+        print("Error in /models:", e)
+        return []
+
+
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest):
     metric_dfs = {
@@ -216,7 +235,6 @@ def analyze(req: AnalyzeRequest):
     prompt = build_prompt(metric_dfs, req.model_name)
     summary = summarize_with_llm(prompt)
 
-    # Convert DataFrames to JSON-serializable format
     serialized_metrics = {
         label: df[["timestamp", "value"]].to_dict(orient="records")
         for label, df in metric_dfs.items()

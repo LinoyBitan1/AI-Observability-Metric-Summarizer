@@ -14,7 +14,7 @@ spec:
     spec:
       serviceAccountName: metric-analyzer
       containers:
-        - name: streamlit-app
+        - name: metric-mcp
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           ports:
             - containerPort: 8000
@@ -22,14 +22,9 @@ spec:
             - name: PROMETHEUS_URL
               value: "{{ .Values.config.prometheusUrl }}"
             - name: LLM_URL
-              value: "{{ .Values.llm.url }}"  
+              value: "http://llama-3-2-3b-instruct-predictor.{{ .Release.Namespace }}.svc.cluster.local:8080"
             - name: LLM_API_TOKEN
-              value: "{{ .Values.llm.apiToken }}"  
-            # - name: LLM_MODELS
-            #   valueFrom:
-            #     configMapKeyRef:
-            #       name: llm-models
-            #       key: models
+              value: "{{ .Values.llm.apiToken }}"
             - name: THANOS_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -39,8 +34,17 @@ spec:
             - name: thanos-token
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
+            - name: trusted-ca
+              mountPath: /etc/pki/ca-trust/extracted/pem
+              readOnly: true
       volumes:
         - name: thanos-token
           secret:
             secretName: metric-analyzer
-            defaultMode: 0440      
+            defaultMode: 0440
+        - name: trusted-ca
+          configMap:
+            name: trusted-ca-bundle
+            items:
+              - key: service-ca.crt
+                path: ca-bundle.crt

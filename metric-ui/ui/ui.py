@@ -8,7 +8,7 @@ import os
 
 # --- Config ---
 API_URL = os.getenv("MCP_API_URL", "http://mcp-api:8000")
-
+# API_URL = "http://localhost:8000"
 # --- Page & Sidebar Config ---
 st.set_page_config(page_title="AI Metric Summarizer", layout="wide")
 
