@@ -23,7 +23,7 @@ It helps teams **understand what’s going well, what’s going wrong**, and rec
 - **Streamlit App**: Renders dashboard, handles summarization and chat  
 - **LLM (Llama 3.x)**: Deployed on OpenShift AI and queried via `/v1/completions` API  
 
-![Architecture](docs/img/Architecture.jpg)
+![Architecture](docs/img/arch-1.jpg)
 
 ---
 
