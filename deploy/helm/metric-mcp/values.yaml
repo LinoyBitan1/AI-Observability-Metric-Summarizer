@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: quay.io/ecosystem-appeng/metric-mcp
-  tag: 0.11
+  tag: ts3
 
 service:
   type: ClusterIP
@@ -14,7 +14,7 @@ route:
 
 config:
   prometheusUrl: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
-
+  
 llm:
   url: ""
   apiToken: ""

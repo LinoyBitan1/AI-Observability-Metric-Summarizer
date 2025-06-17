@@ -22,9 +22,11 @@ spec:
             - name: PROMETHEUS_URL
               value: "{{ .Values.config.prometheusUrl }}"
             - name: LLM_URL
-              value: "http://llama-3-2-3b-instruct-predictor.{{ .Release.Namespace }}.svc.cluster.local:8080"
+              value: "http://llama-3-2-3b-instruct-predictor.{{ .Release.Namespace }}.svc.cluster.local:8080/v1/openai/v1"
             - name: LLM_API_TOKEN
               value: "{{ .Values.llm.apiToken }}"
+            - name: LLAMA_STACK_URL
+              value: "http://llamastack.{{ .Release.Namespace }}.svc.cluster.local:8321/v1/openai/v1"
             - name: THANOS_TOKEN
               valueFrom:
                 secretKeyRef:

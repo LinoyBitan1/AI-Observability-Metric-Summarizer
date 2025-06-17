@@ -12,8 +12,6 @@ MAKEFLAGS += --no-print-directory
 POSTGRES_USER ?= postgres
 POSTGRES_PASSWORD ?= rag_password
 POSTGRES_DBNAME ?= rag_blueprint
-MINIO_USER ?= minio_rag_user
-MINIO_PASSWORD ?= minio_rag_password
 HF_TOKEN ?= $(shell bash -c 'read -r -p "Enter Hugging Face Token: " HF_TOKEN; echo $$HF_TOKEN')
 RAG_CHART := rag
 METRIC_MCP_RELEASE_NAME ?= metric-mcp
@@ -53,6 +51,20 @@ helm_llm_service_args = \
     $(if $(SAFETY_TOLERATION),--set-json global.models.$(SAFETY).tolerations='$(call TOLERATIONS_TEMPLATE,$(SAFETY_TOLERATION))',) \
     $(if $(RAW_DEPLOYMENT),--set llm-service.rawDeploymentMode=$(RAW_DEPLOYMENT),)
 
+helm_llama_stack_args = \
+    $(if $(LLM),--set global.models.$(LLM).enabled=true,) \
+    $(if $(SAFETY),--set global.models.$(SAFETY).enabled=true,) \
+    $(if $(LLM_URL),--set global.models.$(LLM).url='$(LLM_URL)',) \
+    $(if $(SAFETY_URL),--set global.models.$(SAFETY).url='$(SAFETY_URL)',) \
+    $(if $(LLM_API_TOKEN),--set global.models.$(LLM).apiToken='$(LLM_API_TOKEN)',) \
+    $(if $(SAFETY_API_TOKEN),--set global.models.$(SAFETY).apiToken='$(SAFETY_API_TOKEN)',) \
+    $(if $(LLAMA_STACK_ENV),--set-json llama-stack.secrets='$(LLAMA_STACK_ENV)',) \
+    $(if $(RAW_DEPLOYMENT),--set llama-stack.rawDeploymentMode=$(RAW_DEPLOYMENT),)
+
+helm_pgvector_args = \
+    --set pgvector.secret.user=$(POSTGRES_USER) \
+    --set pgvector.secret.password=$(POSTGRES_PASSWORD) \
+    --set pgvector.secret.dbname=$(POSTGRES_DBNAME)
 
 # Default target
 .PHONY: help
@@ -109,9 +121,13 @@ install-metric-ui: namespace
 .PHONY: install-rag
 install-rag: namespace
 	@$(eval LLM_SERVICE_ARGS := $(call helm_llm_service_args))
+	@$(eval LLAMA_STACK_ARGS := $(call helm_llama_stack_args))
+	@$(eval PGVECTOR_ARGS := $(call helm_pgvector_args))
 	@echo "Installing $(RAG_CHART) helm chart"
 	@helm -n $(NAMESPACE) upgrade --install $(RAG_CHART) $(RAG_CHART) -n $(NAMESPACE) \
-		$(LLM_SERVICE_ARGS)
+		$(LLM_SERVICE_ARGS) \
+		$(LLAMA_STACK_ARGS) \
+		$(PGVECTOR_ARGS)
 	@echo "Waiting for model services to deploy. It will take around 10-15 minutes depending on the size of the model..."
 	@oc wait -n $(NAMESPACE) --for=condition=Ready --timeout=60m inferenceservice --all ||:
 	@echo "$(RAG_CHART) installed successfully"
