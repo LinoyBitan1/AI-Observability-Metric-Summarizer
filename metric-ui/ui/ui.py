@@ -55,6 +55,15 @@ def get_models():
         st.sidebar.error(f"Error fetching models: {e}")
         return []
 
+@st.cache_data(ttl=300)
+def get_multi_models():
+    try:
+        res = requests.get(f"{API_URL}/multi_models")
+        return res.json()
+    except Exception as e:
+        st.sidebar.error(f"Error fetching multi-models: {e}")
+        return []
+
 model_list = get_models()
 model_name = st.sidebar.selectbox("Select Model (namespace | model)", model_list)
 
@@ -79,12 +88,18 @@ if selected_datetime > now:
 selected_start = int(selected_datetime.timestamp())
 selected_end = int(now.timestamp())
 
+# --- Multi-model support ---
+multi_model_list = get_multi_models()
+multi_model_name = st.sidebar.selectbox("Select LLM for analysis", multi_model_list)
+
+
 # --- Analyze Button ---
 if st.button("🔍 Analyze Metrics"):
     with st.spinner("Analyzing metrics..."):
         try:
             response = requests.post(f"{API_URL}/analyze", json={
                 "model_name": model_name,
+                "llm_model_name": multi_model_name,
                 "start_ts": selected_start,
                 "end_ts": selected_end
             })

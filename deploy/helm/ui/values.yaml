@@ -1,6 +1,6 @@
 image:
-  repository: quay.io/ecosystem-appeng/metric-ui
-  tag: tt1
+  repository: quay.io/rh-ee-lbitan/metric-ui
+  tag: test-linoy
   pullPolicy: IfNotPresent
 
 service:

@@ -1,8 +1,8 @@
 replicaCount: 1
 
 image:
-  repository: quay.io/ecosystem-appeng/metric-mcp
-  tag: 0.11
+  repository: quay.io/rh-ee-lbitan/metric-mcp
+  tag: test-linoy
 
 service:
   type: ClusterIP
@@ -18,3 +18,4 @@ config:
 llm:
   url: ""
   apiToken: ""
+  modelName: ""
