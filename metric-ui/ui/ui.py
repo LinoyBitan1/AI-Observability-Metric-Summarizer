@@ -157,10 +157,10 @@ if page == "📊 Metric Summarizer":
 
 # --- 🤖 Chat with Prometheus Page ---
 elif page == "🤖 Chat with Prometheus":
-    st.markdown("<h1>🤖 Chat with Prometheus</h1>", unsafe_allow_html=True)
+    st.markdown("<h1>Chat with Prometheus</h1>", unsafe_allow_html=True)
     st.markdown(f"Currently selected namespace: **{selected_namespace}**")
     st.markdown("Ask questions like: `What's the P95 latency?`, `Is GPU usage stable?`, etc.")
-    user_question = st.text_input("Your natural language question")
+    user_question = st.text_input("Your question")
     if st.button("Chat with Metrics"):
         if not user_question.strip():
             st.warning("Please enter a question.")

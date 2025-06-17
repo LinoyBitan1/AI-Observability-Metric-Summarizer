@@ -12,7 +12,7 @@ app = FastAPI()
 
 # --- CONFIG ---
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
-LLM_URL = os.getenv("LLM_URL", "http://localhost:8080")
+LLAMA_STACK_URL = os.getenv("LLAMA_STACK_URL", "http://localhost:8321/v1/openai/v1")
 LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
 LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"
 
@@ -270,9 +270,9 @@ def summarize_with_llm(prompt: str) -> str:
         "model": LLM_MODEL_SUMMARIZATION,
         "prompt": prompt,
         "temperature": 0.5,
-        "max_tokens": 1000 # Increased max_tokens to prevent truncation
+        "max_tokens": 1000
     }
-    response = requests.post(f"{LLM_URL}/v1/completions", headers=headers, json=payload, verify=verify)
+    response = requests.post(f"{LLAMA_STACK_URL}/completions", headers=headers, json=payload, verify=verify)
     response.raise_for_status()
     response_json = response.json()
     if "choices" not in response_json or not response_json["choices"]:
@@ -364,7 +364,9 @@ def build_flexible_llm_prompt(question: str, model_name: str, metrics_data_summa
     namespace_context = f"You are currently focused on the namespace: **{selected_namespace}**\n\n" if selected_namespace else ""
 
     return f"""
-{namespace_context}You are a senior MLOps engineer and Prometheus expert. Your task is to provide a PromQL query and a summary based on the user's question and the current metric status.
+{namespace_context}You are a distinguished engineer and MLOps expert, renowned for your ability to synthesize complex operational data into clear, insightful recommendations.
+
+Your task: Given the user's question and the current metric status, provide a PromQL query and a summary.
 
 Available Metrics:
 {metrics_list}
@@ -374,7 +376,7 @@ Current Metric Status:
 
 IMPORTANT: Respond with a single, complete JSON object with EXACTLY two fields:
 "promql": (string) A relevant PromQL query (empty string if not applicable). Do NOT include a namespace label in the PromQL query.
-"summary": (string) A concise, technical explanation. Use plain text only. Do NOT use markdown or any nested JSON-like structures within this string. Include actual values from "Current Metric Status" when relevant.
+"summary": (string) Write a short, thoughtful paragraph as if you are advising a team of engineers. Offer clear, actionable insights, and sound like a senior technical leader. Use plain text only. Do NOT use markdown or any nested JSON-like structures within this string. Include actual values from "Current Metric Status" when relevant.
 
 Rules for JSON output:
 - Use double quotes for all keys and string values.
@@ -385,7 +387,7 @@ Rules for JSON output:
 Example:
 {{
   "promql": "count by(model_name) (vllm:request_prompt_tokens_created)",
-  "summary": "Models in the current namespace are: [list models from Current Metric Status]"
+  "summary": "Based on the current metrics, the system is operating within expected parameters. However, I recommend monitoring the request rate closely as a precaution. If you anticipate increased load, consider scaling resources proactively to maintain performance."
 }}
 
 Question: {question}
@@ -519,4 +521,3 @@ def chat_metrics(req: ChatMetricsRequest):
             "promql": "",
             "summary": f"An unexpected error occurred: {e}. Raw LLM output: {llm_response}"
         }
-
