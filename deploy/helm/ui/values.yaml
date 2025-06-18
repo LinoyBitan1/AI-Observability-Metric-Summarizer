@@ -1,6 +1,6 @@
 image:
   repository: quay.io/ecosystem-appeng/metric-ui
-  tag: ts2
+  tag: ts5
   pullPolicy: IfNotPresent
 
 service:

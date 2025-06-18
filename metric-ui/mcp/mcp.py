@@ -314,7 +314,7 @@ def _get_models_helper():
             namespace = entry.get("namespace", "").strip()
             if model and namespace:
                 model_set.add(f"{namespace} | {model}")
-        return sorted(list(model_set)) # Return a list here
+        return sorted(list(model_set))
     except Exception as e:
         print("Error getting models:", e)
         return []
@@ -323,6 +323,33 @@ def _get_models_helper():
 def list_models():
     return _get_models_helper()
 
+@app.get("/namespaces")
+def list_namespaces():
+    try:
+        headers = {"Authorization": f"Bearer {THANOS_TOKEN}"}
+        response = requests.get(
+            f"{PROMETHEUS_URL}/api/v1/series",
+            headers=headers,
+            params={
+                "match[]": 'vllm:request_prompt_tokens_created',
+                "start": int((datetime.now().timestamp()) - 86400),  # last 24 hours for better coverage
+                "end": int(datetime.now().timestamp())
+            },
+            verify=verify
+        )
+        response.raise_for_status()
+        series = response.json()["data"]
+
+        namespace_set = set()
+        for entry in series:
+            namespace = entry.get("namespace", "").strip()
+            model = entry.get("model_name", "").strip()
+            if namespace and model:
+                namespace_set.add(namespace)
+        return sorted(list(namespace_set))
+    except Exception as e:
+        print("Error getting namespaces:", e)
+        return []
 
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest):
