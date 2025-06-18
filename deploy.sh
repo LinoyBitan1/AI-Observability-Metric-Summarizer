@@ -6,8 +6,8 @@ set -e
 # Configuration
 NAMESPACE="llama-stack-summarizer"
 TOLERATION="g5-gpu"
-MCP_IMAGE="quay.io/rh-ee-lbitan/metric-mcp:test-linoy"
-UI_IMAGE="quay.io/rh-ee-lbitan/metric-ui:test-linoy"
+MCP_IMAGE="quay.io/rh-ee-lbitan/metric-mcp:test-linoy5"
+UI_IMAGE="quay.io/rh-ee-lbitan/metric-ui:test-linoy5"
 HF_TOKEN=""  # Set your Hugging Face token here
 UI_URL="https://ui-route-llama-stack-summarizer.apps.ai-dev02.kni.syseng.devcluster.openshift.com/"  # Your UI route URL
 

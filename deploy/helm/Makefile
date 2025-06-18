@@ -22,8 +22,13 @@ METRIC_UI_RELEASE_NAME ?= ui
 METRIC_UI_CHART_PATH ?= ui
 TOLERATIONS_TEMPLATE=[{"key":"$(1)","effect":"NoSchedule","operator":"Exists"}]
 
-# Multi-model configuration
-MULTI_MODELS ?= llama-3-2-3b-instruct
+# Multi-model configuration - Single source of truth for available models
+MULTI_MODELS ?= llama-3-2-3b-instruct llama-3-2-1b-instruct
+MULTI_MODELS_IDs ?= meta-llama/Llama-3.2-3B-Instruct meta-llama/Llama-3.2-1B-Instruct
+space := $(nullstring) $(nullstring)
+comma := ,
+MODELS_JSON := $(shell echo '["$(subst $(space),$(comma),$(MULTI_MODELS))"]')
+MODELS_JSON_IDs := $(shell echo '["$(subst $(space),$(comma),$(MULTI_MODELS_IDs))"]')
 
 # If using extra tools that require API Keys set the LLAMA_STACK_ENV variable with key, value pairs
 # LLAMA_STACK_ENV ?= {Key1: "Value1", Key2: "Value2" etc.}
@@ -99,13 +104,16 @@ list-models: depend
 
 .PHONY: install-metric-mcp
 install-metric-mcp: namespace
-	@echo "Extracting LLM service URL"
-	LLM_URL=$$(oc get inferenceservice llama-3-2-3b-instruct -n $(NAMESPACE) -o jsonpath='{.status.url}'); \
-	echo "Detected LLM_URL=$$LLM_URL"; \
+	@echo "Installing MCP with models: $(MULTI_MODELS)"
+	@for model in $(MULTI_MODELS); do \
+		echo "Getting URL for model: $$model"; \
+		LLM_URL=$$(oc get inferenceservice $$model -n $(NAMESPACE) -o jsonpath='{.status.url}'); \
+		echo "Detected LLM_URL for $$model: $$LLM_URL"; \
+	done
 	helm upgrade --install $(METRIC_MCP_RELEASE_NAME) $(METRIC_MCP_CHART_PATH) \
 		-n $(NAMESPACE) \
-		--set-json llm.url="\"$$LLM_URL\"" \
-		--set-json listModels.modelId.enabledModelIds='$(MODELS_JSON)'
+		--set-json listModels.modelId.enabledModelIds='$(MODELS_JSON)' \
+		--set-json availableModels='$(MODELS_JSON_IDs)'
 
 .PHONY: install-metric-ui
 install-metric-ui: namespace

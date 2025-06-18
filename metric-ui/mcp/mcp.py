@@ -12,7 +12,8 @@ app = FastAPI()
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 # LLM_URL = os.getenv("LLM_URL", "http://localhost:8080")
 LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
-LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"
+LLM_MODELS_SUMMARIZATION = os.getenv("AVAILABLE_MODELS", "")
+# LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"
 
 # Handle token input from volume or literal
 token_input = os.getenv("THANOS_TOKEN", "/var/run/secrets/kubernetes.io/serviceaccount/token")
@@ -36,18 +37,19 @@ ALL_METRICS = {
     "Inference Time (s)": "vllm:request_inference_time_seconds_count"
 }
 
+
 # --- Request Models ---
 class AnalyzeRequest(BaseModel):
     model_name: str
     start_ts: int
     end_ts: int
-    llm_model_name: str = "llama-3-2-3b-instruct"
+    llm_model_name: str 
 
 class ChatRequest(BaseModel):
     model_name: str
     prompt_summary: str
     question: str
-    llm_model_name: str = "llama-3-2-3b-instruct"
+    llm_model_name: str 
 
 # --- Helpers ---
 def fetch_metrics(query, model_name, start, end):
@@ -177,12 +179,12 @@ User Prompt:
 Now respond with a concise, technical answer only.
 """.strip()
 
-def summarize_with_llm(prompt: str, llm_url: str) -> str:
+def summarize_with_llm(prompt: str, llm_url: str, summarize_model_id: str) -> str:
     headers = {"Content-Type": "application/json"}
     if LLM_API_TOKEN:
         headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
     payload = {
-        "model": LLM_MODEL_SUMMARIZATION,
+        "model": summarize_model_id,
         "prompt": prompt,
         "temperature": 0.5,
         "max_tokens": 600
@@ -227,7 +229,6 @@ def list_models():
         print("Error in /models:", e)
         return []
 
-
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest):
     metric_dfs = {
@@ -235,9 +236,10 @@ def analyze(req: AnalyzeRequest):
         for label, query in ALL_METRICS.items()
     }
     prompt = build_prompt(metric_dfs, req.model_name)
-    llm_model_name = req.llm_model_name
-    llm_url = f"http://{llm_model_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
-    summary = summarize_with_llm(prompt, llm_url)
+    summarize_model_name = req.summarize_model_name
+    summarize_model_id - req.summarize_model_id
+    llm_url = f"http://{summarize_model_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
+    summary = summarize_with_llm(prompt, llm_url, summarize_model_id)
 
     serialized_metrics = {
         label: df[["timestamp", "value"]].to_dict(orient="records")
@@ -254,10 +256,13 @@ def analyze(req: AnalyzeRequest):
 @app.post("/chat")
 def chat(req: ChatRequest):
     prompt = build_chat_prompt(user_question=req.question, metrics_summary=req.prompt_summary)
-    llm_url = f"http://{req.llm_model_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
-    response = summarize_with_llm(prompt, llm_url)
+    summarize_model_name = req.summarize_model_name
+    summarize_model_id - req.summarize_model_id
+    llm_url = f"http://{summarize_model_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
+    response = summarize_with_llm(prompt, llm_url, summarize_model_id)
     return {"response": response}
 
 @app.get("/multi_models")
 def list_multi_models():
-    return ["llama-3-2-3b-instruct", "llama-guard-3-8b"]
+    summarization_models = [x for x in LLM_MODELS_SUMMARIZATION.split(",") if x]
+    return summarization_models

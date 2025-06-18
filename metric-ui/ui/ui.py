@@ -90,7 +90,7 @@ selected_end = int(now.timestamp())
 
 # --- Multi-model support ---
 multi_model_list = get_multi_models()
-multi_model_name = st.sidebar.selectbox("Select LLM for analysis", multi_model_list)
+multi_model_name = st.sidebar.selectbox("Select LLM for summarization", multi_model_list)
 
 
 # --- Analyze Button ---
@@ -99,7 +99,8 @@ if st.button("🔍 Analyze Metrics"):
         try:
             response = requests.post(f"{API_URL}/analyze", json={
                 "model_name": model_name,
-                "llm_model_name": multi_model_name,
+                "summarize_model_name" : multi_model_name.split("/")[-1],
+                "summarize_model_id": multi_model_name,
                 "start_ts": selected_start,
                 "end_ts": selected_end
             })
@@ -135,6 +136,8 @@ if "summary" in st.session_state:
                     try:
                         reply = requests.post(f"{API_URL}/chat", json={
                             "model_name": st.session_state["model_name"],
+                            "summarize_model_name" : multi_model_name.split("/")[-1],
+                            "summarize_model_id": multi_model_name,
                             "prompt_summary": st.session_state["prompt"],
                             "question": question
                         })
