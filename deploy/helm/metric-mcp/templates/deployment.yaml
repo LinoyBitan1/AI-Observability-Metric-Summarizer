@@ -27,6 +27,8 @@ spec:
               value: "{{ .Release.Namespace }}"
             - name: AVAILABLE_MODELS
               value: "{{ .Values.availableModels | join "," }}"
+            - name: MODEL_MAPPING
+              value: '{{ .Values.modelMapping | toJson }}'
             - name: THANOS_TOKEN
               valueFrom:
                 secretKeyRef:

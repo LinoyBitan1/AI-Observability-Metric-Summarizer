@@ -13,7 +13,8 @@ API_URL = os.getenv("MCP_API_URL", "http://mcp-api:8000")
 st.set_page_config(page_title="AI Metric Summarizer", layout="wide")
 
 # --- Apple-style Minimalist Theme ---
-st.markdown("""
+st.markdown(
+    """
 <style>
     html, body, [class*="css"] {
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto;
@@ -38,13 +39,16 @@ st.markdown("""
     }
     footer, header { visibility: hidden; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # --- Title ---
 st.markdown("<h1>📊 AI Model Metric Summarizer</h1>", unsafe_allow_html=True)
 
 # --- Sidebar ---
 st.sidebar.title("Navigation")
+
 
 @st.cache_data(ttl=300)
 def get_models():
@@ -55,6 +59,7 @@ def get_models():
         st.sidebar.error(f"Error fetching models: {e}")
         return []
 
+
 @st.cache_data(ttl=300)
 def get_multi_models():
     try:
@@ -63,6 +68,7 @@ def get_multi_models():
     except Exception as e:
         st.sidebar.error(f"Error fetching multi-models: {e}")
         return []
+
 
 model_list = get_models()
 model_name = st.sidebar.selectbox("Select Model (namespace | model)", model_list)
@@ -90,20 +96,24 @@ selected_end = int(now.timestamp())
 
 # --- Multi-model support ---
 multi_model_list = get_multi_models()
-multi_model_name = st.sidebar.selectbox("Select LLM for summarization", multi_model_list)
+multi_model_name = st.sidebar.selectbox(
+    "Select LLM for summarization", multi_model_list
+)
 
 
 # --- Analyze Button ---
 if st.button("🔍 Analyze Metrics"):
     with st.spinner("Analyzing metrics..."):
         try:
-            response = requests.post(f"{API_URL}/analyze", json={
-                "model_name": model_name,
-                "summarize_model_name" : multi_model_name.split("/")[-1],
-                "summarize_model_id": multi_model_name,
-                "start_ts": selected_start,
-                "end_ts": selected_end
-            })
+            response = requests.post(
+                f"{API_URL}/analyze",
+                json={
+                    "model_name": model_name,
+                    "summarize_model_id": multi_model_name,
+                    "start_ts": selected_start,
+                    "end_ts": selected_end,
+]                },
+            )
             response.raise_for_status()
             result = response.json()
 
@@ -134,13 +144,15 @@ if "summary" in st.session_state:
             else:
                 with st.spinner("Assistant is thinking..."):
                     try:
-                        reply = requests.post(f"{API_URL}/chat", json={
-                            "model_name": st.session_state["model_name"],
-                            "summarize_model_name" : multi_model_name.split("/")[-1],
-                            "summarize_model_id": multi_model_name,
-                            "prompt_summary": st.session_state["prompt"],
-                            "question": question
-                        })
+                        reply = requests.post(
+                            f"{API_URL}/chat",
+                            json={
+                                "model_name": st.session_state["model_name"],
+                                "summarize_model_id": multi_model_name,
+                                "prompt_summary": st.session_state["prompt"],
+                                "question": question,
+                            },
+                        )
                         reply.raise_for_status()
                         st.markdown("**Assistant's Response:**")
                         st.markdown(reply.json()["response"])
@@ -151,8 +163,12 @@ if "summary" in st.session_state:
         st.markdown("### 📊 Metric Dashboard")
         cols = st.columns(3)
         metrics_to_display = [
-            "Prompt Tokens Created", "P95 Latency (s)", "Requests Running",
-            "GPU Usage (%)", "Output Tokens Created", "Inference Time (s)"
+            "Prompt Tokens Created",
+            "P95 Latency (s)",
+            "Requests Running",
+            "GPU Usage (%)",
+            "Output Tokens Created",
+            "Inference Time (s)",
         ]
         metric_data = st.session_state.get("metric_data", {})
         for i, label in enumerate(metrics_to_display):
@@ -163,7 +179,11 @@ if "summary" in st.session_state:
                     avg_val = sum(values) / len(values)
                     max_val = max(values)
                     with cols[i % 3]:
-                        st.metric(label=label, value=f"{avg_val:.2f}", delta=f"↑ Max: {max_val:.2f}")
+                        st.metric(
+                            label=label,
+                            value=f"{avg_val:.2f}",
+                            delta=f"↑ Max: {max_val:.2f}",
+                        )
                 except Exception as e:
                     with cols[i % 3]:
                         st.metric(label=label, value="Error", delta=f"{e}")
@@ -178,7 +198,9 @@ if "summary" in st.session_state:
             raw_data = metric_data.get(label, [])
             if raw_data:
                 try:
-                    timestamps = [datetime.fromisoformat(p["timestamp"]) for p in raw_data]
+                    timestamps = [
+                        datetime.fromisoformat(p["timestamp"]) for p in raw_data
+                    ]
                     values = [p["value"] for p in raw_data]
                     df = pd.DataFrame({label: values}, index=timestamps)
                     dfs.append(df)

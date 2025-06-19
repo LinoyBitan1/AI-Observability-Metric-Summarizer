@@ -4,12 +4,12 @@
 set -e
 
 # Configuration
-NAMESPACE="llama-stack-summarizer"
+NAMESPACE="linoy-metrics-summarizer"
 TOLERATION="g5-gpu"
-MCP_IMAGE="quay.io/rh-ee-lbitan/metric-mcp:test-linoy5"
-UI_IMAGE="quay.io/rh-ee-lbitan/metric-ui:test-linoy5"
+MCP_IMAGE="quay.io/rh-ee-lbitan/metric-mcp:test-linoy16"
+UI_IMAGE="quay.io/rh-ee-lbitan/metric-ui:test-linoy16"
 HF_TOKEN=""  # Set your Hugging Face token here
-UI_URL="https://ui-route-llama-stack-summarizer.apps.ai-dev02.kni.syseng.devcluster.openshift.com/"  # Your UI route URL
+UI_URL="https://ui-route-linoy-metrics-summarizer.apps.tsisodia-dev.51ty.p1.openshiftapps.com/"  # Your UI route URL
 
 echo "🚀 Starting deployment process..."
 

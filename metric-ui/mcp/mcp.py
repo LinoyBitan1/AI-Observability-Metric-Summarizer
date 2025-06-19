@@ -5,6 +5,8 @@ import requests
 from datetime import datetime
 from scipy.stats import linregress
 import os
+import json
+from typing import List, Dict, Any
 
 app = FastAPI()
 
@@ -15,8 +17,19 @@ LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
 LLM_MODELS_SUMMARIZATION = os.getenv("AVAILABLE_MODELS", "")
 # LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"
 
+# Load model mapping from environment
+MODEL_MAPPING = {}
+try:
+    model_mapping_str = os.getenv("MODEL_MAPPING", "{}")
+    MODEL_MAPPING = json.loads(model_mapping_str)
+except Exception as e:
+    print(f"Warning: Could not parse MODEL_MAPPING: {e}")
+    MODEL_MAPPING = {}
+
 # Handle token input from volume or literal
-token_input = os.getenv("THANOS_TOKEN", "/var/run/secrets/kubernetes.io/serviceaccount/token")
+token_input = os.getenv(
+    "THANOS_TOKEN", "/var/run/secrets/kubernetes.io/serviceaccount/token"
+)
 if os.path.exists(token_input):
     with open(token_input, "r") as f:
         THANOS_TOKEN = f.read().strip()
@@ -34,7 +47,7 @@ ALL_METRICS = {
     "Requests Running": "vllm:num_requests_running",
     "GPU Usage (%)": "vllm:gpu_cache_usage_perc",
     "Output Tokens Created": "vllm:request_generation_tokens_created",
-    "Inference Time (s)": "vllm:request_inference_time_seconds_count"
+    "Inference Time (s)": "vllm:request_inference_time_seconds_count",
 }
 
 
@@ -43,13 +56,15 @@ class AnalyzeRequest(BaseModel):
     model_name: str
     start_ts: int
     end_ts: int
-    llm_model_name: str 
+    summarize_model_id: str
+
 
 class ChatRequest(BaseModel):
     model_name: str
     prompt_summary: str
     question: str
-    llm_model_name: str 
+    summarize_model_id: str
+
 
 # --- Helpers ---
 def fetch_metrics(query, model_name, start, end):
@@ -65,7 +80,7 @@ def fetch_metrics(query, model_name, start, end):
         f"{PROMETHEUS_URL}/api/v1/query_range",
         headers=headers,
         params={"query": promql_query, "start": start, "end": end, "step": "30s"},
-        verify=verify
+        verify=verify,
     )
     response.raise_for_status()
     result = response.json()["data"]["result"]
@@ -82,6 +97,7 @@ def fetch_metrics(query, model_name, start, end):
 
     return pd.DataFrame(rows)
 
+
 def detect_anomalies(df, label):
     if df.empty:
         return "No data"
@@ -94,6 +110,7 @@ def detect_anomalies(df, label):
     elif latest_val < (mean - std):
         return f"⚠️ {label} unusually low (latest={latest_val:.2f}, mean={mean:.2f})"
     return f"{label} stable (latest={latest_val:.2f}, mean={mean:.2f})"
+
 
 def describe_trend(df):
     if df.empty or len(df) < 2:
@@ -109,6 +126,7 @@ def describe_trend(df):
     elif slope < -0.01:
         return "decreasing"
     return "stable"
+
 
 def compute_health_score(metric_dfs):
     score, reasons = 0, []
@@ -128,6 +146,7 @@ def compute_health_score(metric_dfs):
             score -= 1
             reasons.append(f"Too many requests (avg={mean:.2f})")
     return score, reasons
+
 
 def build_prompt(metric_dfs, model_name):
     score, _ = compute_health_score(metric_dfs)
@@ -149,6 +168,7 @@ def build_prompt(metric_dfs, model_name):
 2. What's problematic?
 3. Recommendations?
 """.strip()
+
 
 def build_chat_prompt(user_question: str, metrics_summary: str) -> str:
     return f"""
@@ -179,6 +199,7 @@ User Prompt:
 Now respond with a concise, technical answer only.
 """.strip()
 
+
 def summarize_with_llm(prompt: str, llm_url: str, summarize_model_id: str) -> str:
     headers = {"Content-Type": "application/json"}
     if LLM_API_TOKEN:
@@ -187,18 +208,22 @@ def summarize_with_llm(prompt: str, llm_url: str, summarize_model_id: str) -> st
         "model": summarize_model_id,
         "prompt": prompt,
         "temperature": 0.5,
-        "max_tokens": 600
+        "max_tokens": 600,
     }
-    response = requests.post(f"{llm_url}/v1/completions", headers=headers, json=payload, verify=verify)
+    response = requests.post(
+        f"{llm_url}/v1/completions", headers=headers, json=payload, verify=verify
+    )
     response.raise_for_status()
     response_json = response.json()
     if "choices" not in response_json or not response_json["choices"]:
         raise ValueError("Invalid LLM response format")
     return response_json["choices"][0]["text"].strip()
 
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 @app.get("/models")
 def list_models():
@@ -208,11 +233,11 @@ def list_models():
             f"{PROMETHEUS_URL}/api/v1/series",
             headers=headers,
             params={
-                "match[]": 'vllm:request_prompt_tokens_created',
+                "match[]": "vllm:request_prompt_tokens_created",
                 "start": int((datetime.now().timestamp()) - 3600),
-                "end": int(datetime.now().timestamp())
+                "end": int(datetime.now().timestamp()),
             },
-            verify=verify
+            verify=verify,
         )
         response.raise_for_status()
         series = response.json()["data"]
@@ -229,6 +254,7 @@ def list_models():
         print("Error in /models:", e)
         return []
 
+
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest):
     metric_dfs = {
@@ -236,10 +262,11 @@ def analyze(req: AnalyzeRequest):
         for label, query in ALL_METRICS.items()
     }
     prompt = build_prompt(metric_dfs, req.model_name)
-    summarize_model_name = req.summarize_model_name
-    summarize_model_id - req.summarize_model_id
-    llm_url = f"http://{summarize_model_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
-    summary = summarize_with_llm(prompt, llm_url, summarize_model_id)
+
+    # Use model mapping to get service name from model ID
+    service_name = MODEL_MAPPING.get(req.summarize_model_id, req.model_name)
+    llm_url = f"http://{service_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
+    summary = summarize_with_llm(prompt, llm_url, req.summarize_model_id)
 
     serialized_metrics = {
         label: df[["timestamp", "value"]].to_dict(orient="records")
@@ -250,17 +277,22 @@ def analyze(req: AnalyzeRequest):
         "model_name": req.model_name,
         "health_prompt": prompt,
         "llm_summary": summary,
-        "metrics": serialized_metrics
+        "metrics": serialized_metrics,
     }
+
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-    prompt = build_chat_prompt(user_question=req.question, metrics_summary=req.prompt_summary)
-    summarize_model_name = req.summarize_model_name
-    summarize_model_id - req.summarize_model_id
-    llm_url = f"http://{summarize_model_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
-    response = summarize_with_llm(prompt, llm_url, summarize_model_id)
+    prompt = build_chat_prompt(
+        user_question=req.question, metrics_summary=req.prompt_summary
+    )
+
+    # Use model mapping to get service name from model ID
+    service_name = MODEL_MAPPING.get(req.summarize_model_id)
+    llm_url = f"http://{service_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
+    response = summarize_with_llm(prompt, llm_url, req.summarize_model_id)
     return {"response": response}
+
 
 @app.get("/multi_models")
 def list_multi_models():

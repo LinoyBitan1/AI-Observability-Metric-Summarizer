@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: quay.io/rh-ee-lbitan/metric-mcp
-  tag: test-linoy5
+  tag: test-linoy16
 
 service:
   type: ClusterIP
@@ -22,3 +22,6 @@ llm:
 
 # List of available models for the UI dropdown - will be set by Makefile
 availableModels: []
+
+# Model mapping: model_id -> service_name - will be set by Makefile
+modelMapping: {}
