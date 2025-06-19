@@ -6,7 +6,6 @@ from datetime import datetime
 from scipy.stats import linregress
 import os
 import json
-import pdb
 from typing import List, Dict, Any, Optional
 
 
@@ -207,16 +206,10 @@ Now respond with a concise, technical answer only.
 def summarize_with_llm(
     prompt: str, llm_url: str, summarize_model_id: str, api_key: Optional[str] = None
 ) -> str:
-    # BREAKPOINT 1: Function entry
-    pdb.set_trace()
-
     headers = {"Content-Type": "application/json"}
 
     # Check if this is an OpenAI model (external API)
     if summarize_model_id.startswith("openai/"):
-        # BREAKPOINT 2: OpenAI path
-        pdb.set_trace()
-
         # Call OpenAI API directly
         if not api_key:
             raise ValueError("API key required for OpenAI models")
@@ -231,16 +224,9 @@ def summarize_with_llm(
             "max_tokens": 600,
         }
 
-        # BREAKPOINT 3: Before making OpenAI API call
-        pdb.set_trace()
-
         response = requests.post(
             "https://api.openai.com/v1/chat/completions", headers=headers, json=payload
         )
-
-        # BREAKPOINT 4: After OpenAI API response
-        pdb.set_trace()
-
         response.raise_for_status()
         response_json = response.json()
 
@@ -249,9 +235,6 @@ def summarize_with_llm(
         return response_json["choices"][0]["message"]["content"].strip()
 
     else:
-        # BREAKPOINT 5: Local model path
-        pdb.set_trace()
-
         # Local model (Llama) - use existing logic
         if LLM_API_TOKEN:
             headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
