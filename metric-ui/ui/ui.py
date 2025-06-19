@@ -100,6 +100,15 @@ multi_model_name = st.sidebar.selectbox(
     "Select LLM for summarization", multi_model_list
 )
 
+# --- API Key input (appears for any model that needs it) ---
+api_key = st.sidebar.text_input(
+    "🔑 API Key (if required)",
+    type="password",
+    value=st.session_state.get("api_key", ""),
+    help="Enter API key if your selected model requires authentication",
+)
+if api_key:
+    st.session_state["api_key"] = api_key
 
 # --- Analyze Button ---
 if st.button("🔍 Analyze Metrics"):
@@ -112,7 +121,8 @@ if st.button("🔍 Analyze Metrics"):
                     "summarize_model_id": multi_model_name,
                     "start_ts": selected_start,
                     "end_ts": selected_end,
-]                },
+                    "api_key": st.session_state.get("api_key"),
+                },
             )
             response.raise_for_status()
             result = response.json()
@@ -151,6 +161,7 @@ if "summary" in st.session_state:
                                 "summarize_model_id": multi_model_name,
                                 "prompt_summary": st.session_state["prompt"],
                                 "question": question,
+                                "api_key": st.session_state.get("api_key"),
                             },
                         )
                         reply.raise_for_status()

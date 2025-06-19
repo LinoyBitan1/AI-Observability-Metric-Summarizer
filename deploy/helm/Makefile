@@ -23,15 +23,15 @@ METRIC_UI_CHART_PATH ?= ui
 TOLERATIONS_TEMPLATE=[{"key":"$(1)","effect":"NoSchedule","operator":"Exists"}]
 
 # Multi-model configuration - Single source of truth for available models
-MULTI_MODELS ?= llama-3-2-3b-instruct llama-3-2-1b-instruct
-MULTI_MODELS_IDs ?= meta-llama/Llama-3.2-3B-Instruct meta-llama/Llama-3.2-1B-Instruct
+MULTI_MODELS ?= llama-3-2-3b-instruct
+MULTI_MODELS_IDs ?= meta-llama/Llama-3.2-3B-Instruct openai/4o-mini
 space := $(nullstring) $(nullstring)
 comma := ,
 MODELS_JSON := $(shell echo '["$(subst $(space),$(comma),$(MULTI_MODELS))"]')
 MODELS_JSON_IDs := $(shell echo '["$(subst $(space),$(comma),$(MULTI_MODELS_IDs))"]')
 
-# Model mapping: model_id -> service_name
-MODEL_MAPPING_JSON := $(shell echo '{"meta-llama/Llama-3.2-3B-Instruct":"llama-3-2-3b-instruct","meta-llama/Llama-3.2-1B-Instruct":"llama-3-2-1b-instruct"}')
+# Model mapping: model_id -> service_name (only for local models)
+MODEL_MAPPING_JSON := $(shell echo '{"meta-llama/Llama-3.2-3B-Instruct":"llama-3-2-3b-instruct"}')
 
 # If using extra tools that require API Keys set the LLAMA_STACK_ENV variable with key, value pairs
 # LLAMA_STACK_ENV ?= {Key1: "Value1", Key2: "Value2" etc.}

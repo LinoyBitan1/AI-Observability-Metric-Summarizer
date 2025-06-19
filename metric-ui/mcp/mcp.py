@@ -6,7 +6,9 @@ from datetime import datetime
 from scipy.stats import linregress
 import os
 import json
-from typing import List, Dict, Any
+import pdb
+from typing import List, Dict, Any, Optional
+
 
 app = FastAPI()
 
@@ -57,6 +59,7 @@ class AnalyzeRequest(BaseModel):
     start_ts: int
     end_ts: int
     summarize_model_id: str
+    api_key: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
@@ -64,6 +67,7 @@ class ChatRequest(BaseModel):
     prompt_summary: str
     question: str
     summarize_model_id: str
+    api_key: Optional[str] = None
 
 
 # --- Helpers ---
@@ -200,24 +204,72 @@ Now respond with a concise, technical answer only.
 """.strip()
 
 
-def summarize_with_llm(prompt: str, llm_url: str, summarize_model_id: str) -> str:
+def summarize_with_llm(
+    prompt: str, llm_url: str, summarize_model_id: str, api_key: Optional[str] = None
+) -> str:
+    # BREAKPOINT 1: Function entry
+    pdb.set_trace()
+
     headers = {"Content-Type": "application/json"}
-    if LLM_API_TOKEN:
-        headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
-    payload = {
-        "model": summarize_model_id,
-        "prompt": prompt,
-        "temperature": 0.5,
-        "max_tokens": 600,
-    }
-    response = requests.post(
-        f"{llm_url}/v1/completions", headers=headers, json=payload, verify=verify
-    )
-    response.raise_for_status()
-    response_json = response.json()
-    if "choices" not in response_json or not response_json["choices"]:
-        raise ValueError("Invalid LLM response format")
-    return response_json["choices"][0]["text"].strip()
+
+    # Check if this is an OpenAI model (external API)
+    if summarize_model_id.startswith("openai/"):
+        # BREAKPOINT 2: OpenAI path
+        pdb.set_trace()
+
+        # Call OpenAI API directly
+        if not api_key:
+            raise ValueError("API key required for OpenAI models")
+
+        headers["Authorization"] = f"Bearer {api_key}"
+
+        # Convert to OpenAI chat format
+        payload = {
+            "model": "gpt-4o-mini",  # OpenAI model name (not the full ID)
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.5,
+            "max_tokens": 600,
+        }
+
+        # BREAKPOINT 3: Before making OpenAI API call
+        pdb.set_trace()
+
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions", headers=headers, json=payload
+        )
+
+        # BREAKPOINT 4: After OpenAI API response
+        pdb.set_trace()
+
+        response.raise_for_status()
+        response_json = response.json()
+
+        if "choices" not in response_json or not response_json["choices"]:
+            raise ValueError("Invalid OpenAI response format")
+        return response_json["choices"][0]["message"]["content"].strip()
+
+    else:
+        # BREAKPOINT 5: Local model path
+        pdb.set_trace()
+
+        # Local model (Llama) - use existing logic
+        if LLM_API_TOKEN:
+            headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
+
+        payload = {
+            "model": summarize_model_id,
+            "prompt": prompt,
+            "temperature": 0.5,
+            "max_tokens": 600,
+        }
+        response = requests.post(
+            f"{llm_url}/v1/completions", headers=headers, json=payload, verify=verify
+        )
+        response.raise_for_status()
+        response_json = response.json()
+        if "choices" not in response_json or not response_json["choices"]:
+            raise ValueError("Invalid LLM response format")
+        return response_json["choices"][0]["text"].strip()
 
 
 @app.get("/health")
@@ -263,10 +315,17 @@ def analyze(req: AnalyzeRequest):
     }
     prompt = build_prompt(metric_dfs, req.model_name)
 
-    # Use model mapping to get service name from model ID
-    service_name = MODEL_MAPPING.get(req.summarize_model_id, req.model_name)
-    llm_url = f"http://{service_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
-    summary = summarize_with_llm(prompt, llm_url, req.summarize_model_id)
+    # Check if this is an external model (4o-mini)
+    if req.summarize_model_id.startswith("openai/"):
+        # External model - call OpenAI API directly
+        summary = summarize_with_llm(prompt, "", req.summarize_model_id, req.api_key)
+    else:
+        # Local model - use service URL
+        service_name = MODEL_MAPPING.get(req.summarize_model_id)
+        llm_url = f"http://{service_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
+        summary = summarize_with_llm(
+            prompt, llm_url, req.summarize_model_id, req.api_key
+        )
 
     serialized_metrics = {
         label: df[["timestamp", "value"]].to_dict(orient="records")
@@ -287,10 +346,18 @@ def chat(req: ChatRequest):
         user_question=req.question, metrics_summary=req.prompt_summary
     )
 
-    # Use model mapping to get service name from model ID
-    service_name = MODEL_MAPPING.get(req.summarize_model_id)
-    llm_url = f"http://{service_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
-    response = summarize_with_llm(prompt, llm_url, req.summarize_model_id)
+    # Check if this is an external model (4o-mini)
+    if req.summarize_model_id.startswith("openai/"):
+        # External model - call OpenAI API directly
+        response = summarize_with_llm(prompt, "", req.summarize_model_id, req.api_key)
+    else:
+        # Local model - use service URL
+        service_name = MODEL_MAPPING.get(req.summarize_model_id, req.model_name)
+        llm_url = f"http://{service_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
+        response = summarize_with_llm(
+            prompt, llm_url, req.summarize_model_id, req.api_key
+        )
+
     return {"response": response}
 
 

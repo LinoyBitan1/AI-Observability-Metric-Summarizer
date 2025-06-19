@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: quay.io/rh-ee-lbitan/metric-mcp
-  tag: test-linoy16
+  tag: test-linoy-t2
 
 service:
   type: ClusterIP
