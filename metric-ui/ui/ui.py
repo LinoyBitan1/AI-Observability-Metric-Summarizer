@@ -94,21 +94,47 @@ if selected_datetime > now:
 selected_start = int(selected_datetime.timestamp())
 selected_end = int(now.timestamp())
 
+st.sidebar.markdown("---")
+
+# --- Select LLM ---
+st.sidebar.markdown("### Select LLM for summarization")
+
 # --- Multi-model support ---
 multi_model_list = get_multi_models()
 multi_model_name = st.sidebar.selectbox(
     "Select LLM for summarization", multi_model_list
 )
 
-# --- API Key input (appears for any model that needs it) ---
+# --- Define model key requirements ---
+MODEL_REQUIRES_API_KEY = {
+    "openai/gpt-4o-mini": True,
+    "meta-llama/Llama-3.2-3B-Instruct": False,
+    # Add others
+}
+current_model_requires_api_key = MODEL_REQUIRES_API_KEY.get(multi_model_name, False)
+
+
+# API Key input with custom label and help text
 api_key = st.sidebar.text_input(
-    "🔑 API Key (if required)",
+    label="🔑 API Key",
     type="password",
     value=st.session_state.get("api_key", ""),
-    help="Enter API key if your selected model requires authentication",
+    help="Enter your API key if required by the selected model",
 )
+
+# Save only if user typed something
 if api_key:
     st.session_state["api_key"] = api_key
+
+# Caption to show key requirement status
+if current_model_requires_api_key:
+    st.sidebar.caption("⚠️ This model requires an API key.")
+else:
+    st.sidebar.caption("✅ No API key is required for this model.")
+
+# Optional validation warning if required key is missing
+if current_model_requires_api_key and not api_key:
+    st.sidebar.warning("🚫 Please enter an API key to use this model.")
 
 # --- Analyze Button ---
 if st.button("🔍 Analyze Metrics"):
@@ -135,6 +161,19 @@ if st.button("🔍 Analyze Metrics"):
             print("📥 Prompt sent to LLM:\n", result["health_prompt"])
             st.success("✅ Summary generated successfully!")
 
+        except requests.exceptions.HTTPError as http_err:
+            if response.status_code == 401:
+                st.error("❌ Invalid API Key. Please check and try again.")
+            elif response.status_code == 403:
+                st.error("❌ Access denied. Please check your API key permissions.")
+            elif response.status_code == 429:
+                st.error("❌ Rate limit exceeded. Please try again later.")
+            elif response.status_code == 500:
+                st.error(
+                    "❌ Internal server error. Please check your API Key or try again later."
+                )
+            else:
+                st.error(f"❌ HTTP error occurred: {http_err}")
         except Exception as e:
             st.error(f"❌ Error during analysis: {e}")
 
@@ -167,6 +206,21 @@ if "summary" in st.session_state:
                         reply.raise_for_status()
                         st.markdown("**Assistant's Response:**")
                         st.markdown(reply.json()["response"])
+                    except requests.exceptions.HTTPError as http_err:
+                        if reply.status_code == 401:
+                            st.error("❌ Invalid API Key. Please check and try again.")
+                        elif reply.status_code == 403:
+                            st.error(
+                                "❌ Access denied. Please check your API key permissions."
+                            )
+                        elif reply.status_code == 429:
+                            st.error("❌ Rate limit exceeded. Please try again later.")
+                        elif reply.status_code == 500:
+                            st.error(
+                                "❌ Internal server error. Please check your API Key or try again later."
+                            )
+                        else:
+                            st.error(f"❌ HTTP error occurred: {http_err}")
                     except Exception as e:
                         st.error(f"❌ Chat failed: {e}")
 

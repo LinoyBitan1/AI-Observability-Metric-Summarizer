@@ -24,7 +24,7 @@ TOLERATIONS_TEMPLATE=[{"key":"$(1)","effect":"NoSchedule","operator":"Exists"}]
 
 # Multi-model configuration - Single source of truth for available models
 MULTI_MODELS ?= llama-3-2-3b-instruct
-MULTI_MODELS_IDs ?= meta-llama/Llama-3.2-3B-Instruct openai/4o-mini
+MULTI_MODELS_IDs ?= meta-llama/Llama-3.2-3B-Instruct openai/gpt-4o-mini
 space := $(nullstring) $(nullstring)
 comma := ,
 MODELS_JSON := $(shell echo '["$(subst $(space),$(comma),$(MULTI_MODELS))"]')
