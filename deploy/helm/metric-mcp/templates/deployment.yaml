@@ -25,10 +25,8 @@ spec:
               value: "{{ .Values.llm.apiToken }}"
             - name: NAMESPACE
               value: "{{ .Release.Namespace }}"
-            - name: AVAILABLE_MODELS
-              value: "{{ .Values.availableModels | join "," }}"
-            - name: MODEL_MAPPING
-              value: '{{ .Values.modelMapping | toJson }}'
+            - name: MODEL_CONFIG
+              value: '{{ .Values.modelConfig | toJson }}'
             - name: THANOS_TOKEN
               valueFrom:
                 secretKeyRef:

@@ -6,8 +6,8 @@ set -e
 # Configuration
 NAMESPACE="linoy-metrics-summarizer"
 TOLERATION="g5-gpu" 
-MCP_IMAGE="quay.io/rh-ee-lbitan/metric-mcp:test-linoy-multi-models2"
-UI_IMAGE="quay.io/rh-ee-lbitan/metric-ui:test-linoy-multi-models3"
+MCP_IMAGE="quay.io/rh-ee-lbitan/metric-mcp:test-linoy-multi-model-config4"
+UI_IMAGE="quay.io/rh-ee-lbitan/metric-ui:test-linoy-multi-model-config4"
 HF_TOKEN=""  # Set your Hugging Face token here
 UI_URL="https://ui-route-linoy-metrics-summarizer.apps.tsisodia-dev.51ty.p1.openshiftapps.com/"  # Your UI route URL
 
@@ -35,7 +35,7 @@ cd ..
 # Deploy using Helm
 echo "🚀 Deploying with Helm..."
 cd deploy/helm/
-HF_TOKEN=$HF_TOKEN make install NAMESPACE=$NAMESPACE TOLERATION=$TOLERATION
+HF_TOKEN=$HF_TOKEN make install NAMESPACE=$NAMESPACE 
 
 # Wait for deployment
 echo "⏳ Waiting for deployment to be ready..."

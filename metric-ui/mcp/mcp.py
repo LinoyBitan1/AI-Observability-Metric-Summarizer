@@ -15,17 +15,15 @@ app = FastAPI()
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 # LLM_URL = os.getenv("LLM_URL", "http://localhost:8080")
 LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
-LLM_MODELS_SUMMARIZATION = os.getenv("AVAILABLE_MODELS", "")
-# LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"
 
-# Load model mapping from environment
-MODEL_MAPPING = {}
+# Load unified model configuration from environment
+MODEL_CONFIG = {}
 try:
-    model_mapping_str = os.getenv("MODEL_MAPPING", "{}")
-    MODEL_MAPPING = json.loads(model_mapping_str)
+    model_config_str = os.getenv("MODEL_CONFIG", "{}")
+    MODEL_CONFIG = json.loads(model_config_str)
 except Exception as e:
-    print(f"Warning: Could not parse MODEL_MAPPING: {e}")
-    MODEL_MAPPING = {}
+    print(f"Warning: Could not parse MODEL_CONFIG: {e}")
+    MODEL_CONFIG = {}
 
 # Handle token input from volume or literal
 token_input = os.getenv(
@@ -208,34 +206,42 @@ def summarize_with_llm(
 ) -> str:
     headers = {"Content-Type": "application/json"}
 
-    # Check if this is an OpenAI model (external API)
-    if summarize_model_id.startswith("openai/"):
-        # Call OpenAI API directly
+    # Get model configuration
+    model_info = MODEL_CONFIG.get(summarize_model_id, {})
+    is_external = model_info.get("external", False)
+
+    if is_external:
+        # External model (like OpenAI, Anthropic, etc.)
         if not api_key:
-            raise ValueError("API key required for OpenAI models")
+            raise ValueError(
+                f"API key required for external model {summarize_model_id}"
+            )
+
+        # Get provider-specific configuration
+        provider = model_info.get("provider", "openai")  # default to openai
+        api_url = model_info.get("apiUrl", "https://api.openai.com/v1/chat/completions")
+        model_name = model_info.get("modelName")
 
         headers["Authorization"] = f"Bearer {api_key}"
 
         # Convert to OpenAI chat format
         payload = {
-            "model": "gpt-4o-mini",  # OpenAI model name (not the full ID)
+            "model": model_name,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.5,
             "max_tokens": 600,
         }
 
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions", headers=headers, json=payload
-        )
+        response = requests.post(api_url, headers=headers, json=payload)
         response.raise_for_status()
         response_json = response.json()
 
         if "choices" not in response_json or not response_json["choices"]:
-            raise ValueError("Invalid OpenAI response format")
+            raise ValueError(f"Invalid {provider} response format")
         return response_json["choices"][0]["message"]["content"].strip()
 
     else:
-        # Local model (Llama) - use existing logic
+        # Local model (deployed in cluster)
         if LLM_API_TOKEN:
             headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
 
@@ -245,14 +251,35 @@ def summarize_with_llm(
             "temperature": 0.5,
             "max_tokens": 600,
         }
+
         response = requests.post(
             f"{llm_url}/v1/completions", headers=headers, json=payload, verify=verify
         )
         response.raise_for_status()
         response_json = response.json()
+
         if "choices" not in response_json or not response_json["choices"]:
             raise ValueError("Invalid LLM response format")
         return response_json["choices"][0]["text"].strip()
+
+
+def get_llm_response(
+    prompt: str, summarize_model_id: str, api_key: Optional[str] = None
+) -> str:
+    """Helper function to get LLM response for both external and internal models"""
+    model_info = MODEL_CONFIG.get(summarize_model_id, {})
+
+    if model_info.get("external", False):
+        # External model - call API directly
+        return summarize_with_llm(prompt, "", summarize_model_id, api_key)
+    else:
+        # Local model - use service URL
+        service_name = model_info.get("serviceName")
+        if not service_name:
+            raise ValueError(f"No service name found for model {summarize_model_id}")
+
+        llm_url = f"http://{service_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
+        return summarize_with_llm(prompt, llm_url, summarize_model_id, api_key)
 
 
 @app.get("/health")
@@ -298,17 +325,8 @@ def analyze(req: AnalyzeRequest):
     }
     prompt = build_prompt(metric_dfs, req.model_name)
 
-    # Check if this is an external model (4o-mini)
-    if req.summarize_model_id.startswith("openai/"):
-        # External model - call OpenAI API directly
-        summary = summarize_with_llm(prompt, "", req.summarize_model_id, req.api_key)
-    else:
-        # Local model - use service URL
-        service_name = MODEL_MAPPING.get(req.summarize_model_id)
-        llm_url = f"http://{service_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
-        summary = summarize_with_llm(
-            prompt, llm_url, req.summarize_model_id, req.api_key
-        )
+    # Get LLM response using helper function
+    summary = get_llm_response(prompt, req.summarize_model_id, req.api_key)
 
     serialized_metrics = {
         label: df[["timestamp", "value"]].to_dict(orient="records")
@@ -329,22 +347,18 @@ def chat(req: ChatRequest):
         user_question=req.question, metrics_summary=req.prompt_summary
     )
 
-    # Check if this is an external model (4o-mini)
-    if req.summarize_model_id.startswith("openai/"):
-        # External model - call OpenAI API directly
-        response = summarize_with_llm(prompt, "", req.summarize_model_id, req.api_key)
-    else:
-        # Local model - use service URL
-        service_name = MODEL_MAPPING.get(req.summarize_model_id, req.model_name)
-        llm_url = f"http://{service_name}-predictor.{os.getenv('NAMESPACE', 'default')}.svc.cluster.local:8080"
-        response = summarize_with_llm(
-            prompt, llm_url, req.summarize_model_id, req.api_key
-        )
+    # Get LLM response using helper function
+    response = get_llm_response(prompt, req.summarize_model_id, req.api_key)
 
     return {"response": response}
 
 
 @app.get("/multi_models")
 def list_multi_models():
-    summarization_models = [x for x in LLM_MODELS_SUMMARIZATION.split(",") if x]
+    summarization_models = [x for x in MODEL_CONFIG.keys() if x]
     return summarization_models
+
+
+@app.get("/model_config")
+def get_model_config():
+    return MODEL_CONFIG

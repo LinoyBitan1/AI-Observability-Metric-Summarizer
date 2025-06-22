@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: quay.io/rh-ee-lbitan/metric-mcp
-  tag: test-linoy-multi-models2
+  tag: test-linoy-multi-model-config4
 
 service:
   type: ClusterIP
@@ -20,8 +20,5 @@ llm:
   apiToken: ""
   modelName: ""
 
-# List of available models for the UI dropdown - will be set by Makefile
-availableModels: []
-
-# Model mapping: model_id -> service_name - will be set by Makefile
-modelMapping: {}
+# Contains all model details: external/internal, API key requirements, service mappings
+modelConfig: {}

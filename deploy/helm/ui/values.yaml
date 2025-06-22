@@ -1,6 +1,6 @@
 image:
   repository: quay.io/rh-ee-lbitan/metric-ui
-  tag: test-linoy-multi-models3
+  tag: test-linoy-multi-model-config4
   pullPolicy: IfNotPresent
 
 service:

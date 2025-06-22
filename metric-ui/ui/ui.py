@@ -52,6 +52,7 @@ st.sidebar.title("Navigation")
 
 @st.cache_data(ttl=300)
 def get_models():
+    """Fetch available models from API"""
     try:
         res = requests.get(f"{API_URL}/models")
         return res.json()
@@ -62,12 +63,53 @@ def get_models():
 
 @st.cache_data(ttl=300)
 def get_multi_models():
+    """Fetch available summarization models from API"""
     try:
         res = requests.get(f"{API_URL}/multi_models")
         return res.json()
     except Exception as e:
         st.sidebar.error(f"Error fetching multi-models: {e}")
         return []
+
+
+@st.cache_data(ttl=300)
+def get_model_config():
+    """Fetch model configuration from API"""
+    try:
+        res = requests.get(f"{API_URL}/model_config")
+        return res.json()
+    except Exception as e:
+        st.sidebar.error(f"Error fetching model config: {e}")
+        return {}
+
+
+def model_requires_api_key(model_id, model_config):
+    """Check if a model requires an API key based on unified configuration"""
+    model_info = model_config.get(model_id, {})
+    return model_info.get("requiresApiKey", False)
+
+
+def clear_session_state():
+    """Clear session state on errors"""
+    for key in ["summary", "prompt", "metric_data"]:
+        if key in st.session_state:
+            del st.session_state[key]
+
+
+def handle_http_error(response, error_msg="HTTP error occurred"):
+    """Handle HTTP errors with appropriate messages"""
+    if response.status_code == 401:
+        st.error("❌ Invalid API Key. Please check and try again.")
+    elif response.status_code == 403:
+        st.error("❌ Access denied. Please check your API key permissions.")
+    elif response.status_code == 429:
+        st.error("❌ Rate limit exceeded. Please try again later.")
+    elif response.status_code == 500:
+        st.error(
+            "❌ Internal server error. Please check your API Key or try again later."
+        )
+    else:
+        st.error(f"❌ {error_msg}: {response.status_code}")
 
 
 model_list = get_models()
@@ -106,25 +148,17 @@ multi_model_name = st.sidebar.selectbox(
 )
 
 # --- Define model key requirements ---
-MODEL_REQUIRES_API_KEY = {
-    "openai/gpt-4o-mini": True,
-    "meta-llama/Llama-3.2-3B-Instruct": False,
-    # Add others
-}
-current_model_requires_api_key = MODEL_REQUIRES_API_KEY.get(multi_model_name, False)
+model_config = get_model_config()
+current_model_requires_api_key = model_requires_api_key(multi_model_name, model_config)
 
 
-# API Key input with custom label and help text
+# --- API Key Input ---
 api_key = st.sidebar.text_input(
     label="🔑 API Key",
     type="password",
     value=st.session_state.get("api_key", ""),
     help="Enter your API key if required by the selected model",
 )
-
-# Save only if user typed something
-if api_key:
-    st.session_state["api_key"] = api_key
 
 # Caption to show key requirement status
 if current_model_requires_api_key:
@@ -140,41 +174,33 @@ if current_model_requires_api_key and not api_key:
 if st.button("🔍 Analyze Metrics"):
     with st.spinner("Analyzing metrics..."):
         try:
-            response = requests.post(
-                f"{API_URL}/analyze",
-                json={
-                    "model_name": model_name,
-                    "summarize_model_id": multi_model_name,
-                    "start_ts": selected_start,
-                    "end_ts": selected_end,
-                    "api_key": st.session_state.get("api_key"),
-                },
-            )
+            # Get parameters from sidebar
+            params = {
+                "model_name": model_name,
+                "summarize_model_id": multi_model_name,
+                "start_ts": selected_start,
+                "end_ts": selected_end,
+                "api_key": api_key,
+            }
+
+            response = requests.post(f"{API_URL}/analyze", json=params)
             response.raise_for_status()
             result = response.json()
 
+            # Store results in session state
             st.session_state["prompt"] = result["health_prompt"]
             st.session_state["summary"] = result["llm_summary"]
-            st.session_state["model_name"] = model_name
+            st.session_state["model_name"] = params["model_name"]
             st.session_state["metric_data"] = result.get("metrics", {})
 
             print("📥 Prompt sent to LLM:\n", result["health_prompt"])
             st.success("✅ Summary generated successfully!")
 
         except requests.exceptions.HTTPError as http_err:
-            if response.status_code == 401:
-                st.error("❌ Invalid API Key. Please check and try again.")
-            elif response.status_code == 403:
-                st.error("❌ Access denied. Please check your API key permissions.")
-            elif response.status_code == 429:
-                st.error("❌ Rate limit exceeded. Please try again later.")
-            elif response.status_code == 500:
-                st.error(
-                    "❌ Internal server error. Please check your API Key or try again later."
-                )
-            else:
-                st.error(f"❌ HTTP error occurred: {http_err}")
+            clear_session_state()
+            handle_http_error(response, "HTTP error occurred")
         except Exception as e:
+            clear_session_state()
             st.error(f"❌ Error during analysis: {e}")
 
 # --- Main Content Layout ---
@@ -200,27 +226,14 @@ if "summary" in st.session_state:
                                 "summarize_model_id": multi_model_name,
                                 "prompt_summary": st.session_state["prompt"],
                                 "question": question,
-                                "api_key": st.session_state.get("api_key"),
+                                "api_key": api_key,
                             },
                         )
                         reply.raise_for_status()
                         st.markdown("**Assistant's Response:**")
                         st.markdown(reply.json()["response"])
                     except requests.exceptions.HTTPError as http_err:
-                        if reply.status_code == 401:
-                            st.error("❌ Invalid API Key. Please check and try again.")
-                        elif reply.status_code == 403:
-                            st.error(
-                                "❌ Access denied. Please check your API key permissions."
-                            )
-                        elif reply.status_code == 429:
-                            st.error("❌ Rate limit exceeded. Please try again later.")
-                        elif reply.status_code == 500:
-                            st.error(
-                                "❌ Internal server error. Please check your API Key or try again later."
-                            )
-                        else:
-                            st.error(f"❌ HTTP error occurred: {http_err}")
+                        handle_http_error(reply, "HTTP error occurred")
                     except Exception as e:
                         st.error(f"❌ Chat failed: {e}")
 
