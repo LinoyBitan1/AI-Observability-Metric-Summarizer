@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pandas as pd
 import requests
@@ -201,6 +201,28 @@ Now respond with a concise, technical answer only.
 """.strip()
 
 
+def _make_api_request(
+    url: str, headers: dict, payload: dict, verify_ssl: bool = True
+) -> dict:
+    """Make API request with consistent error handling"""
+    response = requests.post(url, headers=headers, json=payload, verify=verify_ssl)
+    response.raise_for_status()
+    return response.json()
+
+
+def _validate_and_extract_response(
+    response_json: dict, is_external: bool, provider: str = "LLM"
+) -> str:
+    """Validate response format and extract content"""
+    if "choices" not in response_json or not response_json["choices"]:
+        raise ValueError(f"Invalid {provider} response format")
+
+    if is_external:
+        return response_json["choices"][0]["message"]["content"].strip()
+    else:
+        return response_json["choices"][0]["text"].strip()
+
+
 def summarize_with_llm(
     prompt: str, llm_url: str, summarize_model_id: str, api_key: Optional[str] = None
 ) -> str:
@@ -218,7 +240,7 @@ def summarize_with_llm(
             )
 
         # Get provider-specific configuration
-        provider = model_info.get("provider", "openai")  # default to openai
+        provider = model_info.get("provider", "openai")
         api_url = model_info.get("apiUrl", "https://api.openai.com/v1/chat/completions")
         model_name = model_info.get("modelName")
 
@@ -232,13 +254,10 @@ def summarize_with_llm(
             "max_tokens": 600,
         }
 
-        response = requests.post(api_url, headers=headers, json=payload)
-        response.raise_for_status()
-        response_json = response.json()
-
-        if "choices" not in response_json or not response_json["choices"]:
-            raise ValueError(f"Invalid {provider} response format")
-        return response_json["choices"][0]["message"]["content"].strip()
+        response_json = _make_api_request(api_url, headers, payload, verify_ssl=True)
+        return _validate_and_extract_response(
+            response_json, is_external=True, provider=provider
+        )
 
     else:
         # Local model (deployed in cluster)
@@ -252,15 +271,12 @@ def summarize_with_llm(
             "max_tokens": 600,
         }
 
-        response = requests.post(
-            f"{llm_url}/v1/completions", headers=headers, json=payload, verify=verify
+        response_json = _make_api_request(
+            llm_url + "/v1/completions", headers, payload, verify_ssl=verify
         )
-        response.raise_for_status()
-        response_json = response.json()
-
-        if "choices" not in response_json or not response_json["choices"]:
-            raise ValueError("Invalid LLM response format")
-        return response_json["choices"][0]["text"].strip()
+        return _validate_and_extract_response(
+            response_json, is_external=False, provider="LLM"
+        )
 
 
 def get_llm_response(
@@ -319,38 +335,50 @@ def list_models():
 
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest):
-    metric_dfs = {
-        label: fetch_metrics(query, req.model_name, req.start_ts, req.end_ts)
-        for label, query in ALL_METRICS.items()
-    }
-    prompt = build_prompt(metric_dfs, req.model_name)
+    try:
+        metric_dfs = {
+            label: fetch_metrics(query, req.model_name, req.start_ts, req.end_ts)
+            for label, query in ALL_METRICS.items()
+        }
+        prompt = build_prompt(metric_dfs, req.model_name)
 
-    # Get LLM response using helper function
-    summary = get_llm_response(prompt, req.summarize_model_id, req.api_key)
+        # Get LLM response using helper function
+        summary = get_llm_response(prompt, req.summarize_model_id, req.api_key)
 
-    serialized_metrics = {
-        label: df[["timestamp", "value"]].to_dict(orient="records")
-        for label, df in metric_dfs.items()
-    }
+        serialized_metrics = {
+            label: df[["timestamp", "value"]].to_dict(orient="records")
+            for label, df in metric_dfs.items()
+        }
 
-    return {
-        "model_name": req.model_name,
-        "health_prompt": prompt,
-        "llm_summary": summary,
-        "metrics": serialized_metrics,
-    }
+        return {
+            "model_name": req.model_name,
+            "health_prompt": prompt,
+            "llm_summary": summary,
+            "metrics": serialized_metrics,
+        }
+    except Exception as e:
+        # Handle API key errors and other LLM-related errors
+        raise HTTPException(
+            status_code=500, detail="Please check your API Key or try again later."
+        )
 
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-    prompt = build_chat_prompt(
-        user_question=req.question, metrics_summary=req.prompt_summary
-    )
+    try:
+        prompt = build_chat_prompt(
+            user_question=req.question, metrics_summary=req.prompt_summary
+        )
 
-    # Get LLM response using helper function
-    response = get_llm_response(prompt, req.summarize_model_id, req.api_key)
+        # Get LLM response using helper function
+        response = get_llm_response(prompt, req.summarize_model_id, req.api_key)
 
-    return {"response": response}
+        return {"response": response}
+    except Exception as e:
+        # Handle API key errors and other LLM-related errors
+        raise HTTPException(
+            status_code=500, detail="Please check your API Key or try again later."
+        )
 
 
 @app.get("/multi_models")

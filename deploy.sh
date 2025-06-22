@@ -6,8 +6,8 @@ set -e
 # Configuration
 NAMESPACE="linoy-metrics-summarizer"
 TOLERATION="g5-gpu" 
-MCP_IMAGE="quay.io/rh-ee-lbitan/metric-mcp:test-linoy-multi-model-config4"
-UI_IMAGE="quay.io/rh-ee-lbitan/metric-ui:test-linoy-multi-model-config4"
+MCP_IMAGE="quay.io/rh-ee-lbitan/metric-mcp:refactor-mcp7"
+UI_IMAGE="quay.io/rh-ee-lbitan/metric-ui:refactor-ui7"
 HF_TOKEN=""  # Set your Hugging Face token here
 UI_URL="https://ui-route-linoy-metrics-summarizer.apps.tsisodia-dev.51ty.p1.openshiftapps.com/"  # Your UI route URL
 

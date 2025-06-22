@@ -96,20 +96,16 @@ def clear_session_state():
             del st.session_state[key]
 
 
-def handle_http_error(response, error_msg="HTTP error occurred"):
-    """Handle HTTP errors with appropriate messages"""
+def handle_http_error(response, context):
+    """Handle HTTP errors and display appropriate messages"""
     if response.status_code == 401:
-        st.error("❌ Invalid API Key. Please check and try again.")
+        st.error("❌ Unauthorized. Please check your API Key.")
     elif response.status_code == 403:
-        st.error("❌ Access denied. Please check your API key permissions.")
-    elif response.status_code == 429:
-        st.error("❌ Rate limit exceeded. Please try again later.")
+        st.error("❌ Forbidden. Please check your API Key.")
     elif response.status_code == 500:
-        st.error(
-            "❌ Internal server error. Please check your API Key or try again later."
-        )
+        st.error("❌ Please check your API Key or try again later.")
     else:
-        st.error(f"❌ {error_msg}: {response.status_code}")
+        st.error(f"❌ {context}: {response.status_code} - {response.text}")
 
 
 model_list = get_models()
@@ -158,6 +154,7 @@ api_key = st.sidebar.text_input(
     type="password",
     value=st.session_state.get("api_key", ""),
     help="Enter your API key if required by the selected model",
+    disabled=not current_model_requires_api_key,
 )
 
 # Caption to show key requirement status
@@ -195,10 +192,9 @@ if st.button("🔍 Analyze Metrics"):
 
             print("📥 Prompt sent to LLM:\n", result["health_prompt"])
             st.success("✅ Summary generated successfully!")
-
         except requests.exceptions.HTTPError as http_err:
             clear_session_state()
-            handle_http_error(response, "HTTP error occurred")
+            handle_http_error(http_err.response, "Analysis failed")
         except Exception as e:
             clear_session_state()
             st.error(f"❌ Error during analysis: {e}")
@@ -233,7 +229,7 @@ if "summary" in st.session_state:
                         st.markdown("**Assistant's Response:**")
                         st.markdown(reply.json()["response"])
                     except requests.exceptions.HTTPError as http_err:
-                        handle_http_error(reply, "HTTP error occurred")
+                        handle_http_error(http_err.response, "Chat failed")
                     except Exception as e:
                         st.error(f"❌ Chat failed: {e}")
 
