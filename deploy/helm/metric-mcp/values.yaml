@@ -18,3 +18,7 @@ config:
 llm:
   url: ""
   apiToken: ""
+  modelName: ""
+
+# Contains all model details: external/internal, API key requirements, service mappings
+modelConfig: {}

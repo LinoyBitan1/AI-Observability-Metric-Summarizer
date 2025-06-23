@@ -27,6 +27,10 @@ spec:
               value: "{{ .Values.llm.apiToken }}"
             - name: LLAMA_STACK_URL
               value: "http://llamastack.{{ .Release.Namespace }}.svc.cluster.local:8321/v1/openai/v1"
+            - name: NAMESPACE
+              value: "{{ .Release.Namespace }}"
+            - name: MODEL_CONFIG
+              value: '{{ .Values.modelConfig | toJson }}'
             - name: THANOS_TOKEN
               valueFrom:
                 secretKeyRef:
