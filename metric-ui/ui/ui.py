@@ -11,7 +11,8 @@ PROM_URL = os.getenv("PROM_URL", "http://localhost:9090")
 
 # --- Page Setup ---
 st.set_page_config(page_title="AI Metric Tools", layout="wide")
-st.markdown("""
+st.markdown(
+    """
 <style>
     html, body, [class*="css"] { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto; }
     h1, h2, h3 { font-weight: 600; color: #1c1c1e; letter-spacing: -0.5px; }
@@ -21,15 +22,19 @@ st.markdown("""
     .stButton>button { border-radius: 8px; padding: 0.5em 1.2em; font-size: 1em; }
     footer, header { visibility: hidden; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # --- Page Selector ---
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Go to:", ["📊 Metric Summarizer", "🤖 Chat with Prometheus"])
 
+
 # --- Shared Utilities ---
 @st.cache_data(ttl=300)
 def get_models():
+    """Fetch available models from API"""
     try:
         res = requests.get(f"{API_URL}/models")
         return res.json()
@@ -37,17 +42,68 @@ def get_models():
         st.sidebar.error(f"Error fetching models: {e}")
         return []
 
+
 @st.cache_data(ttl=300)
 def get_namespaces():
     try:
         res = requests.get(f"{API_URL}/models")
         models = res.json()
         # Extract unique namespaces from model names (format: "namespace | model")
-        namespaces = sorted(list(set(model.split(" | ")[0] for model in models if " | " in model)))
+        namespaces = sorted(
+            list(set(model.split(" | ")[0] for model in models if " | " in model))
+        )
         return namespaces
     except Exception as e:
         st.sidebar.error(f"Error fetching namespaces: {e}")
         return []
+
+
+@st.cache_data(ttl=300)
+def get_multi_models():
+    """Fetch available summarization models from API"""
+    try:
+        res = requests.get(f"{API_URL}/multi_models")
+        return res.json()
+    except Exception as e:
+        st.sidebar.error(f"Error fetching multi-models: {e}")
+        return []
+
+
+@st.cache_data(ttl=300)
+def get_model_config():
+    """Fetch model configuration from API"""
+    try:
+        res = requests.get(f"{API_URL}/model_config")
+        return res.json()
+    except Exception as e:
+        st.sidebar.error(f"Error fetching model config: {e}")
+        return {}
+
+
+def model_requires_api_key(model_id, model_config):
+    """Check if a model requires an API key based on unified configuration"""
+    model_info = model_config.get(model_id, {})
+    return model_info.get("requiresApiKey", False)
+
+
+def clear_session_state():
+    """Clear session state on errors"""
+    for key in ["summary", "prompt", "metric_data"]:
+        if key in st.session_state:
+            del st.session_state[key]
+
+
+def handle_http_error(response, context):
+    """Handle HTTP errors and display appropriate messages"""
+    if response.status_code == 401:
+        st.error("❌ Unauthorized. Please check your API Key.")
+    elif response.status_code == 403:
+        st.error("❌ Forbidden. Please check your API Key.")
+    elif response.status_code == 500:
+        st.error("❌ Please check your API Key or try again later.")
+    else:
+        st.error(f"❌ {context}: {response.status_code} - {response.text}")
+
 
 model_list = get_models()
 namespaces = get_namespaces()
@@ -56,7 +112,9 @@ namespaces = get_namespaces()
 selected_namespace = st.sidebar.selectbox("Select Namespace", namespaces)
 
 # Filter models by selected namespace
-filtered_models = [model for model in model_list if model.startswith(f"{selected_namespace} | ")]
+filtered_models = [
+    model for model in model_list if model.startswith(f"{selected_namespace} | ")
+]
 model_name = st.sidebar.selectbox("Select Model", filtered_models)
 
 st.sidebar.markdown("### Select Timestamp Range")
@@ -74,25 +132,75 @@ if selected_datetime > now:
 selected_start = int(selected_datetime.timestamp())
 selected_end = int(now.timestamp())
 
+
+st.sidebar.markdown("---")
+
+# --- Select LLM ---
+st.sidebar.markdown("### Select LLM for summarization")
+
+# --- Multi-model support ---
+multi_model_list = get_multi_models()
+multi_model_name = st.sidebar.selectbox(
+    "Select LLM for summarization", multi_model_list
+)
+
+# --- Define model key requirements ---
+model_config = get_model_config()
+current_model_requires_api_key = model_requires_api_key(multi_model_name, model_config)
+
+
+# --- API Key Input ---
+api_key = st.sidebar.text_input(
+    label="🔑 API Key",
+    type="password",
+    value=st.session_state.get("api_key", ""),
+    help="Enter your API key if required by the selected model",
+    disabled=not current_model_requires_api_key,
+)
+
+# Caption to show key requirement status
+if current_model_requires_api_key:
+    st.sidebar.caption("⚠️ This model requires an API key.")
+else:
+    st.sidebar.caption("✅ No API key is required for this model.")
+
+# Optional validation warning if required key is missing
+if current_model_requires_api_key and not api_key:
+    st.sidebar.warning("🚫 Please enter an API key to use this model.")
+
 # --- 📊 Metric Summarizer Page ---
 if page == "📊 Metric Summarizer":
     st.markdown("<h1>📊 AI Model Metric Summarizer</h1>", unsafe_allow_html=True)
+
+    # --- Analyze Button ---
     if st.button("🔍 Analyze Metrics"):
         with st.spinner("Analyzing metrics..."):
             try:
-                response = requests.post(f"{API_URL}/analyze", json={
+                # Get parameters from sidebar
+                params = {
                     "model_name": model_name,
+                    "summarize_model_id": multi_model_name,
                     "start_ts": selected_start,
-                    "end_ts": selected_end
-                })
+                    "end_ts": selected_end,
+                    "api_key": api_key,
+                }
+
+                response = requests.post(f"{API_URL}/analyze", json=params)
+                response.raise_for_status()
                 result = response.json()
-                st.session_state["prompt"] = result.get("health_prompt", "")
-                st.session_state["summary"] = result.get("llm_summary", "")
-                st.session_state["model_name"] = model_name
+
+                # Store results in session state
+                st.session_state["prompt"] = result["health_prompt"]
+                st.session_state["summary"] = result["llm_summary"]
+                st.session_state["model_name"] = params["model_name"]
                 st.session_state["metric_data"] = result.get("metrics", {})
                 st.success("✅ Summary generated successfully!")
+            except requests.exceptions.HTTPError as http_err:
+                clear_session_state()
+                handle_http_error(http_err.response, "Analysis failed")
             except Exception as e:
-                st.error(f"Error during analysis: {e}")
+                clear_session_state()
+                st.error(f"❌ Error during analysis: {e}")
 
     if "summary" in st.session_state:
         col1, col2 = st.columns([1.3, 1.7])
@@ -104,21 +212,34 @@ if page == "📊 Metric Summarizer":
             if st.button("Ask"):
                 with st.spinner("Assistant is thinking..."):
                     try:
-                        reply = requests.post(f"{API_URL}/chat", json={
-                            "model_name": st.session_state["model_name"],
-                            "prompt_summary": st.session_state["prompt"],
-                            "question": question
-                        })
+                        reply = requests.post(
+                            f"{API_URL}/chat",
+                            json={
+                                "model_name": st.session_state["model_name"],
+                                "summarize_model_id": multi_model_name,
+                                "prompt_summary": st.session_state["prompt"],
+                                "question": question,
+                                "api_key": api_key,
+                            },
+                        )
+                        reply.raise_for_status()
                         st.markdown("**Assistant's Response:**")
                         st.markdown(reply.json()["response"])
+                    except requests.exceptions.HTTPError as http_err:
+                        handle_http_error(http_err.response, "Chat failed")
                     except Exception as e:
-                        st.error(f"Chat failed: {e}")
+                        st.error(f"❌ Chat failed: {e}")
+
         with col2:
             st.markdown("### 📊 Metric Dashboard")
             metric_data = st.session_state.get("metric_data", {})
             metrics = [
-                "Prompt Tokens Created", "P95 Latency (s)", "Requests Running",
-                "GPU Usage (%)", "Output Tokens Created", "Inference Time (s)"
+                "Prompt Tokens Created",
+                "P95 Latency (s)",
+                "Requests Running",
+                "GPU Usage (%)",
+                "Output Tokens Created",
+                "Inference Time (s)",
             ]
             cols = st.columns(3)
             for i, label in enumerate(metrics):
@@ -129,7 +250,11 @@ if page == "📊 Metric Summarizer":
                         avg_val = sum(values) / len(values)
                         max_val = max(values)
                         with cols[i % 3]:
-                            st.metric(label=label, value=f"{avg_val:.2f}", delta=f"↑ Max: {max_val:.2f}")
+                            st.metric(
+                                label=label,
+                                value=f"{avg_val:.2f}",
+                                delta=f"↑ Max: {max_val:.2f}",
+                            )
                     except Exception as e:
                         with cols[i % 3]:
                             st.metric(label=label, value="Error", delta=f"{e}")
@@ -143,7 +268,9 @@ if page == "📊 Metric Summarizer":
                 raw_data = metric_data.get(label, [])
                 if raw_data:
                     try:
-                        timestamps = [datetime.fromisoformat(p["timestamp"]) for p in raw_data]
+                        timestamps = [
+                            datetime.fromisoformat(p["timestamp"]) for p in raw_data
+                        ]
                         values = [p["value"] for p in raw_data]
                         df = pd.DataFrame({label: values}, index=timestamps)
                         dfs.append(df)
@@ -159,7 +286,9 @@ if page == "📊 Metric Summarizer":
 elif page == "🤖 Chat with Prometheus":
     st.markdown("<h1>Chat with Prometheus</h1>", unsafe_allow_html=True)
     st.markdown(f"Currently selected namespace: **{selected_namespace}**")
-    st.markdown("Ask questions like: `What's the P95 latency?`, `Is GPU usage stable?`, etc.")
+    st.markdown(
+        "Ask questions like: `What's the P95 latency?`, `Is GPU usage stable?`, etc."
+    )
     user_question = st.text_input("Your question")
     if st.button("Chat with Metrics"):
         if not user_question.strip():
@@ -167,13 +296,18 @@ elif page == "🤖 Chat with Prometheus":
         else:
             with st.spinner("Querying and summarizing..."):
                 try:
-                    response = requests.post(f"{API_URL}/chat-metrics", json={
-                        "model_name": model_name,
-                        "question": user_question,
-                        "start_ts": selected_start,
-                        "end_ts": selected_end,
-                        "namespace": selected_namespace  # Add namespace to the request
-                    })
+                    response = requests.post(
+                        f"{API_URL}/chat-metrics",
+                        json={
+                            "model_name": model_name,
+                            "question": user_question,
+                            "start_ts": selected_start,
+                            "end_ts": selected_end,
+                            "namespace": selected_namespace,  # Add namespace to the request
+                            "summarize_model_id": multi_model_name,
+                            "api_key": api_key,
+                        },
+                    )
                     data = response.json()
                     promql = data.get("promql", "")
                     summary = data.get("summary", "")

@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pandas as pd
 import requests
@@ -7,6 +7,7 @@ from scipy.stats import linregress
 import os
 import json
 import re
+from typing import List, Dict, Any, Optional
 
 app = FastAPI()
 
@@ -14,10 +15,20 @@ app = FastAPI()
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 LLAMA_STACK_URL = os.getenv("LLAMA_STACK_URL", "http://localhost:8321/v1/openai/v1")
 LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
-LLM_MODEL_SUMMARIZATION = "meta-llama/Llama-3.2-3B-Instruct"
+
+# Load unified model configuration from environment
+MODEL_CONFIG = {}
+try:
+    model_config_str = os.getenv("MODEL_CONFIG", "{}")
+    MODEL_CONFIG = json.loads(model_config_str)
+except Exception as e:
+    print(f"Warning: Could not parse MODEL_CONFIG: {e}")
+    MODEL_CONFIG = {}
 
 # Handle token input from volume or literal
-token_input = os.getenv("THANOS_TOKEN", "/var/run/secrets/kubernetes.io/serviceaccount/token")
+token_input = os.getenv(
+    "THANOS_TOKEN", "/var/run/secrets/kubernetes.io/serviceaccount/token"
+)
 if os.path.exists(token_input):
     with open(token_input, "r") as f:
         THANOS_TOKEN = f.read().strip()
@@ -97,19 +108,26 @@ ALL_METRICS = {
     "Request Queue Time Seconds Sum": "vllm:request_queue_time_seconds_sum",
     "Request Success Created": "vllm:request_success_created",
     "Request Success Total": "vllm:request_success_total",
-    "Spec Decode Num Accepted Tokens Created": "vllm:spec_decode_num_accepted_tokens_created"
+    "Spec Decode Num Accepted Tokens Created": "vllm:spec_decode_num_accepted_tokens_created",
 }
+
 
 # --- Request Models ---
 class AnalyzeRequest(BaseModel):
     model_name: str
     start_ts: int
     end_ts: int
+    summarize_model_id: str
+    api_key: Optional[str] = None
+
 
 class ChatRequest(BaseModel):
     model_name: str
     prompt_summary: str
     question: str
+    summarize_model_id: str
+    api_key: Optional[str] = None
+
 
 class ChatMetricsRequest(BaseModel):
     model_name: str
@@ -117,6 +135,9 @@ class ChatMetricsRequest(BaseModel):
     start_ts: int
     end_ts: int
     namespace: str
+    summarize_model_id: str
+    api_key: Optional[str] = None
+
 
 # --- Helpers ---
 def fetch_metrics(query, model_name, start, end, namespace=None):
@@ -124,15 +145,23 @@ def fetch_metrics(query, model_name, start, end, namespace=None):
     if namespace:
         namespace = namespace.strip()
         if "|" in model_name:
-            model_namespace, actual_model_name = map(str.strip, model_name.split("|", 1))
-            promql_query = f'{query}{{model_name="{actual_model_name}", namespace="{namespace}"}}'
+            model_namespace, actual_model_name = map(
+                str.strip, model_name.split("|", 1)
+            )
+            promql_query = (
+                f'{query}{{model_name="{actual_model_name}", namespace="{namespace}"}}'
+            )
         else:
-            promql_query = f'{query}{{model_name="{model_name}", namespace="{namespace}"}}'
+            promql_query = (
+                f'{query}{{model_name="{model_name}", namespace="{namespace}"}}'
+            )
     else:
         # Original logic if no namespace is explicitly provided (for backward compatibility or other endpoints)
         if "|" in model_name:
             namespace, model_name = map(str.strip, model_name.split("|", 1))
-            promql_query = f'{query}{{model_name="{model_name}", namespace="{namespace}"}}'
+            promql_query = (
+                f'{query}{{model_name="{model_name}", namespace="{namespace}"}}'
+            )
         else:
             model_name = model_name.strip()
             promql_query = f'{query}{{model_name="{model_name}"}}'
@@ -142,7 +171,7 @@ def fetch_metrics(query, model_name, start, end, namespace=None):
         f"{PROMETHEUS_URL}/api/v1/query_range",
         headers=headers,
         params={"query": promql_query, "start": start, "end": end, "step": "30s"},
-        verify=verify
+        verify=verify,
     )
     response.raise_for_status()
     result = response.json()["data"]["result"]
@@ -159,6 +188,7 @@ def fetch_metrics(query, model_name, start, end, namespace=None):
 
     return pd.DataFrame(rows)
 
+
 def detect_anomalies(df, label):
     if df.empty:
         return "No data"
@@ -171,6 +201,7 @@ def detect_anomalies(df, label):
     elif latest_val < (mean - std):
         return f"⚠️ {label} unusually low (latest={latest_val:.2f}, mean={mean:.2f})"
     return f"{label} stable (latest={latest_val:.2f}, mean={mean:.2f})"
+
 
 def describe_trend(df):
     if df.empty or len(df) < 2:
@@ -186,6 +217,7 @@ def describe_trend(df):
     elif slope < -0.01:
         return "decreasing"
     return "stable"
+
 
 def compute_health_score(metric_dfs):
     score, reasons = 0, []
@@ -206,6 +238,7 @@ def compute_health_score(metric_dfs):
             reasons.append(f"Too many requests (avg={mean:.2f})")
     return score, reasons
 
+
 def build_prompt(metric_dfs, model_name):
     score, _ = compute_health_score(metric_dfs)
     header = f"You are evaluating model **{model_name}**.\n\n🩺 Health Score: {score}\n\n📊 **Metrics**:\n"
@@ -219,7 +252,9 @@ def build_prompt(metric_dfs, model_name):
         avg = df["value"].mean()
         # Add an indication if data is present
         data_status = "Data present" if not df.empty else "No data"
-        lines.append(f"- {label}: Avg={avg:.2f}, Trend={trend}, {anomaly} ({data_status})")
+        lines.append(
+            f"- {label}: Avg={avg:.2f}, Trend={trend}, {anomaly} ({data_status})"
+        )
     return f"""{header}
 {chr(10).join(lines)}
 
@@ -228,6 +263,7 @@ def build_prompt(metric_dfs, model_name):
 2. What's problematic?
 3. Recommendations?
 """.strip()
+
 
 def build_chat_prompt(user_question: str, metrics_summary: str) -> str:
     return f"""
@@ -262,34 +298,98 @@ Now provide a concise, technical summary that answers it.
 """.strip()
 
 
-def summarize_with_llm(prompt: str) -> str:
-    headers = {"Content-Type": "application/json"}
-    if LLM_API_TOKEN:
-        headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
-    payload = {
-        "model": LLM_MODEL_SUMMARIZATION,
-        "prompt": prompt,
-        "temperature": 0.5,
-        "max_tokens": 1000
-    }
-    response = requests.post(f"{LLAMA_STACK_URL}/completions", headers=headers, json=payload, verify=verify)
+def _make_api_request(
+    url: str, headers: dict, payload: dict, verify_ssl: bool = True
+) -> dict:
+    """Make API request with consistent error handling"""
+    response = requests.post(url, headers=headers, json=payload, verify=verify_ssl)
     response.raise_for_status()
-    response_json = response.json()
+    return response.json()
+
+
+def _validate_and_extract_response(
+    response_json: dict, is_external: bool, provider: str = "LLM"
+) -> str:
+    """Validate response format and extract content"""
     if "choices" not in response_json or not response_json["choices"]:
-        raise ValueError("Invalid LLM response format")
-    return response_json["choices"][0]["text"].strip()
+        raise ValueError(f"Invalid {provider} response format")
+
+    if is_external:
+        return response_json["choices"][0]["message"]["content"].strip()
+    else:
+        return response_json["choices"][0]["text"].strip()
+
 
 # New helper function to aggressively clean LLM summary strings
 def _clean_llm_summary_string(text: str) -> str:
     # Remove any non-printable ASCII characters (except common whitespace like space, tab, newline)
-    cleaned_text = re.sub(r'[^\x20-\x7E\n\t]', '', text)
+    cleaned_text = re.sub(r"[^\x20-\x7E\n\t]", "", text)
     # Replace multiple spaces/newlines/tabs with single spaces, then strip leading/trailing whitespace
-    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+    cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
     return cleaned_text
+
+
+def summarize_with_llm(
+    prompt: str, summarize_model_id: str, api_key: Optional[str] = None
+) -> str:
+    headers = {"Content-Type": "application/json"}
+
+    # Get model configuration
+    model_info = MODEL_CONFIG.get(summarize_model_id, {})
+    is_external = model_info.get("external", False)
+
+    if is_external:
+        # External model (like OpenAI, Anthropic, etc.)
+        if not api_key:
+            raise ValueError(
+                f"API key required for external model {summarize_model_id}"
+            )
+
+        # Get provider-specific configuration
+        provider = model_info.get("provider", "openai")
+        api_url = model_info.get("apiUrl", "https://api.openai.com/v1/chat/completions")
+        model_name = model_info.get("modelName")
+
+        headers["Authorization"] = f"Bearer {api_key}"
+
+        # Convert to OpenAI chat format
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.5,
+            "max_tokens": 1000,
+        }
+
+        response_json = _make_api_request(api_url, headers, payload, verify_ssl=True)
+        return _validate_and_extract_response(
+            response_json, is_external=True, provider=provider
+        )
+
+    else:
+        # Local model (deployed in cluster)
+        if LLM_API_TOKEN:
+            headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
+
+        payload = {
+            "model": summarize_model_id,
+            "prompt": prompt,
+            "temperature": 0.5,
+            "max_tokens": 1000,
+        }
+
+        response_json = _make_api_request(
+            f"{LLAMA_STACK_URL}/completions", headers, payload, verify_ssl=verify
+        )
+
+        return _validate_and_extract_response(
+            response_json, is_external=False, provider="LLM"
+        )
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 # Helper to get models (extracted from list_models endpoint)
 def _get_models_helper():
@@ -299,11 +399,11 @@ def _get_models_helper():
             f"{PROMETHEUS_URL}/api/v1/series",
             headers=headers,
             params={
-                "match[]": 'vllm:request_prompt_tokens_created',
+                "match[]": "vllm:request_prompt_tokens_created",
                 "start": int((datetime.now().timestamp()) - 3600),
-                "end": int(datetime.now().timestamp())
+                "end": int(datetime.now().timestamp()),
             },
-            verify=verify
+            verify=verify,
         )
         response.raise_for_status()
         series = response.json()["data"]
@@ -319,9 +419,11 @@ def _get_models_helper():
         print("Error getting models:", e)
         return []
 
+
 @app.get("/models")
 def list_models():
     return _get_models_helper()
+
 
 @app.get("/namespaces")
 def list_namespaces():
@@ -331,11 +433,13 @@ def list_namespaces():
             f"{PROMETHEUS_URL}/api/v1/series",
             headers=headers,
             params={
-                "match[]": 'vllm:request_prompt_tokens_created',
-                "start": int((datetime.now().timestamp()) - 86400),  # last 24 hours for better coverage
-                "end": int(datetime.now().timestamp())
+                "match[]": "vllm:request_prompt_tokens_created",
+                "start": int(
+                    (datetime.now().timestamp()) - 86400
+                ),  # last 24 hours for better coverage
+                "end": int(datetime.now().timestamp()),
             },
-            verify=verify
+            verify=verify,
         )
         response.raise_for_status()
         series = response.json()["data"]
@@ -351,44 +455,92 @@ def list_namespaces():
         print("Error getting namespaces:", e)
         return []
 
+
+@app.get("/multi_models")
+def list_multi_models():
+    """Get available summarization models from configuration"""
+    return list(MODEL_CONFIG.keys())
+
+
+@app.get("/model_config")
+def get_model_config():
+    return MODEL_CONFIG
+
+
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest):
-    metric_dfs = {
-        label: fetch_metrics(query, req.model_name, req.start_ts, req.end_ts)
-        for label, query in ALL_METRICS.items()
-    }
-    prompt = build_prompt(metric_dfs, req.model_name)
-    summary = summarize_with_llm(prompt)
+    try:
+        metric_dfs = {
+            label: fetch_metrics(query, req.model_name, req.start_ts, req.end_ts)
+            for label, query in ALL_METRICS.items()
+        }
+        prompt = build_prompt(metric_dfs, req.model_name)
 
-    # Ensure both columns exist, even if the DataFrame is empty
-    serialized_metrics = {}
-    for label, df in metric_dfs.items():
-        for col in ["timestamp", "value"]:
-            if col not in df.columns:
-                df[col] = pd.Series(dtype='datetime64[ns]' if col == "timestamp" else 'float')
-        serialized_metrics[label] = df[["timestamp", "value"]].to_dict(orient="records")
+        summary = summarize_with_llm(prompt, req.summarize_model_id, req.api_key)
 
-    return {
-        "model_name": req.model_name,
-        "health_prompt": prompt,
-        "llm_summary": summary,
-        "metrics": serialized_metrics
-    }
+        # Ensure both columns exist, even if the DataFrame is empty
+        serialized_metrics = {}
+        for label, df in metric_dfs.items():
+            for col in ["timestamp", "value"]:
+                if col not in df.columns:
+                    df[col] = pd.Series(
+                        dtype="datetime64[ns]" if col == "timestamp" else "float"
+                    )
+            serialized_metrics[label] = df[["timestamp", "value"]].to_dict(
+                orient="records"
+            )
+
+        return {
+            "model_name": req.model_name,
+            "health_prompt": prompt,
+            "llm_summary": summary,
+            "metrics": serialized_metrics,
+        }
+    except Exception as e:
+        # Handle API key errors and other LLM-related errors
+        raise HTTPException(
+            status_code=500, detail="Please check your API Key or try again later."
+        )
+
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-    prompt = build_chat_prompt(user_question=req.question, metrics_summary=req.prompt_summary)
-    response = summarize_with_llm(prompt)
-    return {"response": _clean_llm_summary_string(response)}
+    try:
+        prompt = build_chat_prompt(
+            user_question=req.question, metrics_summary=req.prompt_summary
+        )
 
-def build_flexible_llm_prompt(question: str, model_name: str, metrics_data_summary: str, generated_tokens_sum: float = None, selected_namespace: str = None) -> str:
-    metrics_list = "\n".join([f'- "{label}" (PromQL: {query})' for label, query in ALL_METRICS.items()])
-    
+        # Get LLM response using helper function
+        response = summarize_with_llm(prompt, req.summarize_model_id, req.api_key)
+
+        return {"response": _clean_llm_summary_string(response)}
+    except Exception as e:
+        # Handle API key errors and other LLM-related errors
+        raise HTTPException(
+            status_code=500, detail="Please check your API Key or try again later."
+        )
+
+
+def build_flexible_llm_prompt(
+    question: str,
+    model_name: str,
+    metrics_data_summary: str,
+    generated_tokens_sum: float = None,
+    selected_namespace: str = None,
+) -> str:
+    metrics_list = "\n".join(
+        [f'- "{label}" (PromQL: {query})' for label, query in ALL_METRICS.items()]
+    )
+
     summary_tokens_generated = ""
     if generated_tokens_sum is not None:
         summary_tokens_generated = f"A total of {generated_tokens_sum:.2f} tokens were generated across all models and namespaces."
-    
-    namespace_context = f"You are currently focused on the namespace: **{selected_namespace}**\n\n" if selected_namespace else ""
+
+    namespace_context = (
+        f"You are currently focused on the namespace: **{selected_namespace}**\n\n"
+        if selected_namespace
+        else ""
+    )
 
     return f"""
 {namespace_context}You are a distinguished engineer and MLOps expert, renowned for your ability to synthesize complex operational data into clear, insightful recommendations.
@@ -420,20 +572,25 @@ Example:
 Question: {question}
 Response:""".strip()
 
+
 @app.post("/chat-metrics")
 def chat_metrics(req: ChatMetricsRequest):
     # Determine if the question is about listing all models globally or namespace-specific
     question_lower = req.question.lower()
-    is_all_models_query = "all models currently deployed" in question_lower or \
-                         "list all models" in question_lower or \
-                         "what models are deployed" in question_lower.replace("?", "")
+    is_all_models_query = (
+        "all models currently deployed" in question_lower
+        or "list all models" in question_lower
+        or "what models are deployed" in question_lower.replace("?", "")
+    )
     is_tokens_generated_query = "how many tokens generated" in question_lower
-    
+
     metrics_data_summary = ""
     generated_tokens_sum_value = None
-    
+
     metric_dfs = {
-        label: fetch_metrics(query, req.model_name, req.start_ts, req.end_ts, namespace=req.namespace)
+        label: fetch_metrics(
+            query, req.model_name, req.start_ts, req.end_ts, namespace=req.namespace
+        )
         for label, query in ALL_METRICS.items()
     }
 
@@ -443,22 +600,36 @@ def chat_metrics(req: ChatMetricsRequest):
             generated_tokens_sum_value = output_tokens_df["value"].sum()
             metrics_data_summary = f"Output Tokens Created: Total Generated = {generated_tokens_sum_value:.2f}"
         else:
-            metrics_data_summary = "Output Tokens Created: No data available to calculate sum."
+            metrics_data_summary = (
+                "Output Tokens Created: No data available to calculate sum."
+            )
 
     elif is_all_models_query:
         # For "all models" query, fetch globally deployed models directly
         deployed_models_list = _get_models_helper()
-        
+
         # Filter models by namespace from the request
-        deployed_models_list = [model for model in deployed_models_list if f"| {req.namespace}" in model]
-        metrics_data_summary = f"Models in namespace {req.namespace}: " + ", ".join(deployed_models_list) if deployed_models_list else f"No models found in namespace {req.namespace}"
+        deployed_models_list = [
+            model for model in deployed_models_list if f"| {req.namespace}" in model
+        ]
+        metrics_data_summary = (
+            f"Models in namespace {req.namespace}: " + ", ".join(deployed_models_list)
+            if deployed_models_list
+            else f"No models found in namespace {req.namespace}"
+        )
     else:
         # For other metric-specific queries, fetch for the selected model
         # Reuse existing summary builder for the selected model's metrics
         metrics_data_summary = build_prompt(metric_dfs, req.model_name)
 
-    prompt = build_flexible_llm_prompt(req.question, req.model_name, metrics_data_summary, generated_tokens_sum=generated_tokens_sum_value, selected_namespace=req.namespace)
-    llm_response = summarize_with_llm(prompt)
+    prompt = build_flexible_llm_prompt(
+        req.question,
+        req.model_name,
+        metrics_data_summary,
+        generated_tokens_sum=generated_tokens_sum_value,
+        selected_namespace=req.namespace,
+    )
+    llm_response = summarize_with_llm(prompt, req.summarize_model_id, req.api_key)
 
     # Debug LLM response
     print("🧠 Raw LLM response:", llm_response)
@@ -467,84 +638,86 @@ def chat_metrics(req: ChatMetricsRequest):
         # Step 1: Clean the response
         cleaned_response = llm_response.strip()
         print("⚙️ After initial strip:", cleaned_response)
-        
+
         # Remove any markdown code block markers
-        cleaned_response = re.sub(r'```json\s*|\s*```', '', cleaned_response)
+        cleaned_response = re.sub(r"```json\s*|\s*```", "", cleaned_response)
         print("⚙️ After markdown removal:", cleaned_response)
-        
+
         # Remove any leading/trailing whitespace and newlines
         cleaned_response = cleaned_response.strip()
         print("⚙️ After final strip:", cleaned_response)
-        
+
         # Find the JSON object (more robust regex for nested braces)
-        json_match = re.search(r'\{.*?\}', cleaned_response, re.DOTALL)
+        json_match = re.search(r"\{.*?\}", cleaned_response, re.DOTALL)
         if not json_match:
             raise ValueError(f"No JSON object found in response: '{cleaned_response}'")
-        
+
         json_string = json_match.group(0)
         print("⚙️ Extracted JSON string:", json_string)
 
         # Clean the JSON string
         # Remove any newlines and extra spaces
-        json_string = re.sub(r'\s+', ' ', json_string)
+        json_string = re.sub(r"\s+", " ", json_string)
         print("⚙️ After whitespace normalization:", json_string)
-        
+
         # Ensure proper key quoting
-        json_string = re.sub(r'([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', json_string)
+        json_string = re.sub(
+            r"([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:", r'\1"\2":', json_string
+        )
         print("⚙️ After key quoting:", json_string)
-        
+
         # Fix any double-quoted keys
         json_string = re.sub(r'"([^"]+)"\s*"\s*:', r'"\1":', json_string)
         print("⚙️ After double-quoted key fix:", json_string)
-        
+
         # Removed the problematic value quoting regex
         print("⚙️ Value quoting regex removed.")
-        
+
         # Remove trailing commas
-        json_string = re.sub(r',\s*}', '}', json_string)
+        json_string = re.sub(r",\s*}", "}", json_string)
         print("⚙️ After trailing comma removal:", json_string)
-        
+
         print("🔍 Final Cleaned JSON string for parsing:", json_string)
-        
+
         # Parse the JSON
         parsed = json.loads(json_string)
-        
+
         # Extract and clean the fields
         promql = parsed.get("promql", "").strip()
         summary = _clean_llm_summary_string(parsed.get("summary", ""))
-        
+
         # Aggressively ensure the correct namespace is in PromQL
         if promql:
             # Remove existing namespace labels from PromQL if present
-            promql = re.sub(r'\{([^}]*)namespace=[^,}]*(,)?', r'{\1', promql)
+            promql = re.sub(r"\{([^}]*)namespace=[^,}]*(,)?", r"{\1", promql)
             # Add the correct namespace. Handle cases where there are no existing labels or existing labels.
             if "{" in promql:
                 promql = promql.replace("{", f"{{namespace='{req.namespace}', ")
             else:
                 # If no existing curly braces, add them with the namespace
                 promql = f"{promql}{{namespace='{req.namespace}'}}"
-        
+
         if not summary:
             raise ValueError("Empty summary in response")
-        
+
         return {"promql": promql, "summary": summary}
-        
+
     except json.JSONDecodeError as e:
         print(f"⚠️ JSON Decode Error: {e}")
         print(f"Problematic JSON string: {json_string}")
         return {
             "promql": "",
-            "summary": f"Failed to parse response: {e}. Problematic string: '{json_string}'"
+            "summary": f"Failed to parse response: {e}. Problematic string: '{json_string}'",
         }
     except ValueError as e:
         print(f"⚠️ Value Error: {e}")
         return {
             "promql": "",
-            "summary": f"Failed to process response: {e}. Problematic string: '{json_string}'"
+            "summary": f"Failed to process response: {e}. Problematic string: '{json_string}'",
         }
     except Exception as e:
         print(f"⚠️ Unexpected error: {e}")
         return {
             "promql": "",
-            "summary": f"An unexpected error occurred: {e}. Raw LLM output: {llm_response}"
+            "summary": f"An unexpected error occurred: {e}. Raw LLM output: {llm_response}",
         }

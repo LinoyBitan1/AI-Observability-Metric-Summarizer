@@ -20,6 +20,14 @@ METRIC_UI_RELEASE_NAME ?= ui
 METRIC_UI_CHART_PATH ?= ui
 TOLERATIONS_TEMPLATE=[{"key":"$(1)","effect":"NoSchedule","operator":"Exists"}]
 
+# Unified model configuration map
+# Contains all model details: external/internal, API key requirements, service mappings
+MODEL_CONFIG_JSON := $(shell echo '{"meta-llama/Llama-3.2-3B-Instruct":{"external":false,"requiresApiKey":false,"serviceName":"llama-3-2-3b-instruct"},"openai/gpt-4o-mini":{"external":true,"requiresApiKey":true,"serviceName":null,"provider":"openai","apiUrl":"https://api.openai.com/v1/chat/completions","modelName":"gpt-4o-mini"}}')
+
+# Extract only non-external models for deployment
+INTERNAL_MODELS := llama-3-2-3b-instruct
+INTERNAL_MODELS_JSON := $(shell echo '["$(INTERNAL_MODELS)"]')
+
 # If using extra tools that require API Keys set the LLAMA_STACK_ENV variable with key, value pairs
 # LLAMA_STACK_ENV ?= {Key1: "Value1", Key2: "Value2" etc.}
 
@@ -45,6 +53,7 @@ S3_TEMPLATE={"access_key_id":"$(1)","secret_access_key":"$(2)","bucket_name":"$(
 helm_llm_service_args = \
     --set llm-service.secret.hf_token=$(HF_TOKEN) \
     $(if $(DEVICE),--set llm-service.device='$(DEVICE)',) \
+    $(foreach model,$(INTERNAL_MODELS),--set global.models.$(model).enabled=true) \
     $(if $(LLM),--set global.models.$(LLM).enabled=true,) \
     $(if $(SAFETY),--set global.models.$(SAFETY).enabled=true,) \
     $(if $(LLM_TOLERATION),--set-json global.models.$(LLM).tolerations='$(call TOLERATIONS_TEMPLATE,$(LLM_TOLERATION))',) \
@@ -105,13 +114,16 @@ list-models: depend
 
 .PHONY: install-metric-mcp
 install-metric-mcp: namespace
-	@echo "Extracting LLM service URL"
-	LLM_URL=$$(oc get inferenceservice llama-3-2-3b-instruct -n $(NAMESPACE) -o jsonpath='{.status.url}'); \
-	echo "Detected LLM_URL=$$LLM_URL"; \
+	@echo "Installing MCP with internal models: $(INTERNAL_MODELS)"
+	@for model in $(INTERNAL_MODELS); do \
+		echo "Getting URL for model: $$model"; \
+		LLM_URL=$$(oc get inferenceservice $$model -n $(NAMESPACE) -o jsonpath='{.status.url}'); \
+		echo "Detected LLM_URL for $$model: $$LLM_URL"; \
+	done
 	helm upgrade --install $(METRIC_MCP_RELEASE_NAME) $(METRIC_MCP_CHART_PATH) \
 		-n $(NAMESPACE) \
-		--set-json llm.url="\"$$LLM_URL\"" \
-		--set-json listModels.modelId.enabledModelIds='$(MODELS_JSON)'
+		--set-json listModels.modelId.enabledModelIds='$(INTERNAL_MODELS_JSON)' \
+		--set-json modelConfig='$(MODEL_CONFIG_JSON)'
 
 .PHONY: install-metric-ui
 install-metric-ui: namespace
