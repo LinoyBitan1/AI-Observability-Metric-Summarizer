@@ -19,9 +19,9 @@ It helps teams **understand what’s going well, what’s going wrong**, and rec
 
 ## Architecture
 
-- **Prometheus**: Collects and exposes AI model metrics  
-- **Streamlit App**: Renders dashboard, handles summarization and chat  
-- **LLM (Llama 3.x)**: Deployed on OpenShift AI and queried via `/v1/completions` API  
+- **Prometheus**: Collects and exposes AI model metrics
+- **Streamlit App**: Renders dashboard, handles summarization and chat
+- **LLM (Llama 3.x)**: Deployed on OpenShift AI and queried via `/v1/completions` API
 
 ![Architecture](docs/img/arch-1.jpg)
 
@@ -48,22 +48,30 @@ cd deploy/helm
 ```
 
 If you want single model deployment -
+
 ```bash
-make install NAMESPACE=metric-summarizer LLM=llama-3-2-3b-instruct LLM_TOLERATION="nvidia.com/gpu" 
+make install NAMESPACE=metric-summarizer LLM=llama-3-2-3b-instruct LLM_TOLERATION="nvidia.com/gpu"
 ```
 
-If you want multiple model deployments - 
+If you want multiple model deployments -
+
 ```bash
 make install NAMESPACE=llama-stack-summarizer LLM=llama-3-2-3b-instruct LLM_TOLERATION="nvidia.com/gpu" SAFETY=llama-guard-3-8b SAFETY_TOLERATION="nvidia.com/gpu"
 ```
 
+To run and install the full environment, including the extended multi-model support -
+
+```bash
+make install NAMESPACE=$NAMESPACE
+```
+
 This will:
 
-1. Deploy Prometheus  
+1. Deploy Prometheus
 2. Deploy Llama models - single or multiple models
-3. Extract their URLs  
-4. Create a ConfigMap with available models  
-5. Deploy the Streamlit dashboard connected to the LLM  
+3. Extract their URLs
+4. Create a ConfigMap with available models
+5. Deploy the Streamlit dashboard connected to the LLM
 
 Navigate to your **Openshift Cluster --> Networking --> Route** and you should be able to see the route for your application.
 
@@ -78,8 +86,8 @@ metric-ui-route   metric-ui-route-llama-1.apps.tsisodia-spark.2vn8.p1.openshifta
 
 ![UI](docs/img/ui-1.png)
 
-
 To uninstall:
+
 ```bash
 make uninstall NAMESPACE=metric-summarizer
 ```
@@ -109,4 +117,3 @@ We welcome contributions and feedback!
 Please open issues or submit PRs to improve this dashboard or expand model compatibility.
 
 ---
-

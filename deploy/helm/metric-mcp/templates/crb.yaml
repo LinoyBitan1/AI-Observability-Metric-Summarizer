@@ -2,7 +2,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: view-thanos
+  name: view-thanos-{{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -18,7 +18,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: cluster-monitoring-view-thanos
+  name: cluster-monitoring-view-thanos-{{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -33,7 +33,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: openshift-cluster-monitoring-view-thanos
+  name: openshift-cluster-monitoring-view-thanos-{{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -43,29 +43,29 @@ subjects:
     name: metric-analyzer
     namespace: {{ .Release.Namespace }}
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: grafana-prometheus-reader
-rules:
-- apiGroups: ["*"]
-  resources:
-    - "prometheuses"
-    - "prometheuses/*"
-  verbs:
-    - "get"
-    - "list"
-    - "watch"
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRole
+# metadata:
+#   name: grafana-prometheus-reader
+# rules:
+# - apiGroups: ["*"]
+#   resources:
+#     - "prometheuses"
+#     - "prometheuses/*"
+#   verbs:
+#     - "get"
+#     - "list"
+#     - "watch"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: grafana-prometheus-reader-binding
+  name: grafana-prometheus-reader-binding-{{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: grafana-prometheus-reader
 subjects:
-- kind: ServiceAccount
-  name: metric-analyzer
-  namespace: {{ .Release.Namespace }}
+  - kind: ServiceAccount
+    name: metric-analyzer
+    namespace: {{ .Release.Namespace }}

@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import pandas as pd
 import requests
@@ -137,6 +138,18 @@ class ChatMetricsRequest(BaseModel):
     namespace: str
     summarize_model_id: str
     api_key: Optional[str] = None
+
+
+class ReportRequest(BaseModel):
+    model_name: str
+    start_ts: int
+    end_ts: int
+    summarize_model_id: str
+    format: str
+    api_key: Optional[str] = None
+    health_prompt: Optional[str] = None
+    llm_summary: Optional[str] = None
+    metrics_data: Optional[Dict[str, Any]] = None
 
 
 # --- Helpers ---
@@ -495,6 +508,7 @@ def analyze(req: AnalyzeRequest):
             "health_prompt": prompt,
             "llm_summary": summary,
             "metrics": serialized_metrics,
+            "session_available": True,
         }
     except Exception as e:
         # Handle API key errors and other LLM-related errors
@@ -721,3 +735,348 @@ def chat_metrics(req: ChatMetricsRequest):
             "promql": "",
             "summary": f"An unexpected error occurred: {e}. Raw LLM output: {llm_response}",
         }
+
+
+# Report generation
+@app.post("/generate_report")
+def generate_report(request: ReportRequest):
+    """Generate report in requested format"""
+
+    # Check if we have analysis data from UI session
+    if (
+        request.health_prompt is None
+        or request.llm_summary is None
+        or request.metrics_data is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="No analysis data provided. Please run analysis first.",
+        )
+
+    metrics_data = request.metrics_data
+    summary = request.llm_summary
+
+    # Create Report with all required details
+    match request.format.lower():
+        case "html":
+            report_content = generate_html_report(
+                metrics_data,
+                summary,
+                request.model_name,
+                request.start_ts,
+                request.end_ts,
+                request.summarize_model_id,
+            )
+        case "pdf":
+            report_content = generate_pdf_report(
+                metrics_data,
+                summary,
+                request.model_name,
+                request.start_ts,
+                request.end_ts,
+                request.summarize_model_id,
+            )
+        case "markdown":
+            report_content = generate_markdown_report(
+                metrics_data,
+                summary,
+                request.model_name,
+                request.start_ts,
+                request.end_ts,
+                request.summarize_model_id,
+            )
+        case _:
+            raise HTTPException(
+                status_code=400, detail=f"Unsupported format: {request.format}"
+            )
+
+    # Save and send
+    report_id = save_report(report_content, request.format)
+    return {"report_id": report_id, "download_url": f"/download_report/{report_id}"}
+
+
+@app.get("/download_report/{report_id}")
+def download_report(report_id: str):
+    """Download generated report"""
+    report_path = get_report_path(report_id)
+    return FileResponse(report_path)
+
+
+def save_report(report_content: str, format: str) -> str:
+    """Save report content and return report ID"""
+    import uuid
+    import os
+
+    report_id = str(uuid.uuid4())
+    reports_dir = "/tmp/reports"
+    os.makedirs(reports_dir, exist_ok=True)
+
+    file_extension = format.lower()
+    report_path = os.path.join(reports_dir, f"{report_id}.{file_extension}")
+
+    with open(report_path, "w") as f:
+        f.write(report_content)
+
+    return report_id
+
+
+def get_report_path(report_id: str) -> str:
+    """Get file path for report ID"""
+    import os
+
+    reports_dir = "/tmp/reports"
+
+    # Try to find the file with any extension
+    for file in os.listdir(reports_dir):
+        if file.startswith(report_id):
+            return os.path.join(reports_dir, file)
+
+    raise FileNotFoundError(f"Report {report_id} not found")
+
+
+def generate_html_report(
+    metrics_data: Dict[str, Any],
+    summary: str,
+    model_name: str,
+    start_ts: int,
+    end_ts: int,
+    summarize_model_id: str,
+) -> str:
+    """Generate HTML report with all requested details"""
+    start_date = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M:%S")
+    end_date = datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M:%S")
+
+    html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Metrics Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 40px; }}
+        .header {{ background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin-bottom: 30px; }}
+        .section {{ margin-bottom: 30px; }}
+        .metric {{ background-color: #f9f9f9; padding: 15px; margin: 10px 0; border-left: 4px solid #007bff; }}
+        .summary {{ background-color: #e7f3ff; padding: 20px; border-radius: 5px; }}
+        .dashboard {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0; }}
+        .metric-card {{ background-color: #f8f9fa; padding: 15px; border-radius: 5px; border: 1px solid #dee2e6; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #007bff; }}
+        .metric-label {{ font-size: 14px; color: #6c757d; margin-bottom: 5px; }}
+        .metric-delta {{ font-size: 12px; color: #28a745; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #f2f2f2; }}
+        .chart-container {{ margin: 20px 0; padding: 20px; background-color: #f8f9fa; border-radius: 5px; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 AI Model Metrics Report</h1>
+        <p><strong>Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+    </div>
+    
+    <div class="section">
+        <h2>📋 Report Details</h2>
+        <table>
+            <tr><th>Model Selected for Analysis</th><td>{model_name}</td></tr>
+            <tr><th>Investment Range (Time Period)</th><td>{start_date} to {end_date}</td></tr>
+            <tr><th>Summarize Model Chosen</th><td>{summarize_model_id}</td></tr>
+        </table>
+    </div>
+    
+    <div class="section">
+        <h2>🧠 Model Insights Summary</h2>
+        <div class="summary">
+            {summary}
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>📊 Metric Dashboard</h2>
+        <div class="dashboard">
+"""
+
+    # Add metric cards similar to UI
+    key_metrics = [
+        "Prompt Tokens Created",
+        "P95 Latency (s)",
+        "Requests Running",
+        "GPU Usage (%)",
+        "Output Tokens Created",
+        "Inference Time (s)",
+    ]
+
+    for metric_name in key_metrics:
+        data = metrics_data.get(metric_name, [])
+        if data:
+            values = [point["value"] for point in data]
+            avg_val = sum(values) / len(values)
+            max_val = max(values)
+            html_content += f"""
+        <div class="metric-card">
+            <div class="metric-label">{metric_name}</div>
+            <div class="metric-value">{avg_val:.2f}</div>
+            <div class="metric-delta">↑ Max: {max_val:.2f}</div>
+        </div>
+"""
+        else:
+            html_content += f"""
+        <div class="metric-card">
+            <div class="metric-label">{metric_name}</div>
+            <div class="metric-value">N/A</div>
+            <div class="metric-delta">No data</div>
+        </div>
+"""
+
+    html_content += """
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>📈 Trend Over Time</h2>
+        <div class="chart-container">
+            <h3>GPU Usage (%) and P95 Latency (s) Trends</h3>
+"""
+
+    # Add trend data for key metrics
+    trend_metrics = ["GPU Usage (%)", "P95 Latency (s)"]
+    for metric_name in trend_metrics:
+        data = metrics_data.get(metric_name, [])
+        if data:
+            html_content += f"""
+        <div class="metric">
+            <h4>{metric_name}</h4>
+            <table>
+                <tr><th>Timestamp</th><th>Value</th></tr>
+"""
+            for point in data[:20]:  # Show first 20 data points
+                timestamp = point["timestamp"]
+                value = point["value"]
+                html_content += f"<tr><td>{timestamp}</td><td>{value:.2f}</td></tr>"
+
+            html_content += """
+            </table>
+        </div>
+"""
+
+    html_content += """
+        </div>
+    </div>
+    
+"""
+
+    # Add detailed metrics data
+    for metric_name, data in metrics_data.items():
+        if data:
+            html_content += f"""
+        <div class="metric">
+            <h3>{metric_name}</h3>
+            <table>
+                <tr><th>Timestamp</th><th>Value</th></tr>
+"""
+            for point in data[:10]:  # Show first 10 data points
+                timestamp = point["timestamp"]
+                value = point["value"]
+                html_content += f"<tr><td>{timestamp}</td><td>{value:.2f}</td></tr>"
+
+            html_content += """
+            </table>
+        </div>
+"""
+
+    html_content += """
+    </div>
+</body>
+</html>
+"""
+    return html_content
+
+
+def generate_pdf_report(
+    metrics_data: Dict[str, Any],
+    summary: str,
+    model_name: str,
+    start_ts: int,
+    end_ts: int,
+    summarize_model_id: str,
+) -> str:
+    """Generate PDF report (returns HTML that can be converted to PDF)"""
+    # For simplicity, return HTML that can be converted to PDF
+    return generate_html_report(
+        metrics_data, summary, model_name, start_ts, end_ts, summarize_model_id
+    )
+
+
+def generate_markdown_report(
+    metrics_data: Dict[str, Any],
+    summary: str,
+    model_name: str,
+    start_ts: int,
+    end_ts: int,
+    summarize_model_id: str,
+) -> str:
+    """Generate Markdown report"""
+    start_date = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M:%S")
+    end_date = datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M:%S")
+
+    markdown_content = f"""# 📊 AI Model Metrics Report
+
+**Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+## 📋 Report Details
+
+| Field | Value |
+|-------|-------|
+| **Model Selected for Analysis** | {model_name} |
+| **Investment Range (Time Period)** | {start_date} to {end_date} |
+| **Summarize Model Chosen** | {summarize_model_id} |
+
+## 🧠 Model Insights Summary
+
+{summary}
+
+## 📊 Metric Dashboard
+
+"""
+
+    # Add metric cards similar to UI
+    key_metrics = [
+        "Prompt Tokens Created",
+        "P95 Latency (s)",
+        "Requests Running",
+        "GPU Usage (%)",
+        "Output Tokens Created",
+        "Inference Time (s)",
+    ]
+
+    markdown_content += "| Metric | Average Value | Max Value |\n"
+    markdown_content += "|--------|---------------|-----------|\n"
+
+    for metric_name in key_metrics:
+        data = metrics_data.get(metric_name, [])
+        if data:
+            values = [point["value"] for point in data]
+            avg_val = sum(values) / len(values)
+            max_val = max(values)
+            markdown_content += f"| {metric_name} | {avg_val:.2f} | {max_val:.2f} |\n"
+        else:
+            markdown_content += f"| {metric_name} | N/A | N/A |\n"
+
+    markdown_content += "\n## 📈 Trend Over Time\n\n"
+
+    # Add trend data for key metrics
+    trend_metrics = ["GPU Usage (%)", "P95 Latency (s)"]
+    for metric_name in trend_metrics:
+        data = metrics_data.get(metric_name, [])
+        if data:
+            markdown_content += f"### {metric_name}\n\n"
+            markdown_content += "| Timestamp | Value |\n"
+            markdown_content += "|-----------|-------|\n"
+
+            for point in data[:20]:  # Show first 20 data points
+                timestamp = point["timestamp"]
+                value = point["value"]
+                markdown_content += f"| {timestamp} | {value:.2f} |\n"
+
+            markdown_content += "\n"
+
+    return markdown_content

@@ -4,6 +4,8 @@ import requests
 from datetime import datetime
 import pandas as pd
 import os
+import streamlit.components.v1 as components
+import base64
 
 # --- Config ---
 API_URL = os.getenv("MCP_API_URL", "http://localhost:8000")
@@ -168,6 +170,72 @@ else:
 if current_model_requires_api_key and not api_key:
     st.sidebar.warning("🚫 Please enter an API key to use this model.")
 
+
+# --- Report Generation ---
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Download Report")
+
+analysis_performed = st.session_state.get("analysis_performed", False)
+
+if not analysis_performed:
+    st.sidebar.warning("⚠️ Please analyze metrics first to generate a report.")
+
+report_format = st.sidebar.selectbox(
+    "Select Report Format", ["HTML", "PDF", "Markdown"], disabled=not analysis_performed
+)
+
+
+def generate_report_and_download(report_format: str):
+    try:
+        analysis_params = st.session_state["analysis_params"]
+
+        response = requests.post(
+            f"{API_URL}/generate_report",
+            json={
+                "model_name": analysis_params["model_name"],
+                "start_ts": analysis_params["start_ts"],
+                "end_ts": analysis_params["end_ts"],
+                "summarize_model_id": analysis_params["summarize_model_id"],
+                "format": report_format,
+                "api_key": analysis_params["api_key"],
+                "health_prompt": st.session_state["prompt"],
+                "llm_summary": st.session_state["summary"],
+                "metrics_data": st.session_state["metric_data"],
+            },
+        )
+        response.raise_for_status()
+        report_id = response.json()["report_id"]
+        st.success(f"✅ Report generated! ID: {report_id}")
+
+        download_response = requests.get(f"{API_URL}/download_report/{report_id}")
+        download_response.raise_for_status()
+
+        filename = f"ai_metrics_report.{report_format.lower()}"
+
+        # Use st.download_button for proper download handling
+        st.download_button(
+            label="📥 Download Report",
+            data=download_response.content,
+            file_name=filename,
+            mime=(
+                "text/plain"
+                if report_format == "Markdown"
+                else "text/html" if report_format == "HTML" else "application/pdf"
+            ),
+        )
+
+    except requests.exceptions.HTTPError as http_err:
+        st.error(f"HTTP error during report generation: {http_err}")
+    except Exception as e:
+        st.error(f"❌ Error during report generation: {e}")
+
+
+if analysis_performed:
+    if st.sidebar.button("📥 Generate Report"):
+        with st.spinner("Generating report..."):
+            generate_report_and_download(report_format)
+
+
 # --- 📊 Metric Summarizer Page ---
 if page == "📊 Metric Summarizer":
     st.markdown("<h1>📊 AI Model Metric Summarizer</h1>", unsafe_allow_html=True)
@@ -194,7 +262,16 @@ if page == "📊 Metric Summarizer":
                 st.session_state["summary"] = result["llm_summary"]
                 st.session_state["model_name"] = params["model_name"]
                 st.session_state["metric_data"] = result.get("metrics", {})
-                st.success("✅ Summary generated successfully!")
+                st.session_state["analysis_params"] = (
+                    params  # Store for report generation
+                )
+                st.session_state["analysis_performed"] = (
+                    True  # Mark that analysis was performed
+                )
+
+                # Force rerun to update the UI state (enable download button and hide warning)
+                st.rerun()
+
             except requests.exceptions.HTTPError as http_err:
                 clear_session_state()
                 handle_http_error(http_err.response, "Analysis failed")
