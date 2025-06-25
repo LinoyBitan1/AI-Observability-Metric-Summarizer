@@ -185,6 +185,30 @@ report_format = st.sidebar.selectbox(
 )
 
 
+def trigger_download(
+    file_content: bytes, filename: str, mime_type: str = "application/octet-stream"
+):
+
+    b64 = base64.b64encode(file_content).decode()
+
+    dl_link = f"""
+    <html>
+    <body>
+    <script>
+    const link = document.createElement('a');
+    link.href = "data:{mime_type};base64,{b64}";
+    link.download = "{filename}";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    </script>
+    </body>
+    </html>
+    """
+
+    components.html(dl_link, height=0, width=0)
+
+
 def generate_report_and_download(report_format: str):
     try:
         analysis_params = st.session_state["analysis_params"]
@@ -210,19 +234,16 @@ def generate_report_and_download(report_format: str):
         download_response = requests.get(f"{API_URL}/download_report/{report_id}")
         download_response.raise_for_status()
 
+        mime_map = {
+            "HTML": "text/html",
+            "PDF": "application/pdf",
+            "Markdown": "text/markdown",
+        }
+        mime_type = mime_map.get(report_format, "application/octet-stream")
+
         filename = f"ai_metrics_report.{report_format.lower()}"
 
-        # Use st.download_button for proper download handling
-        st.download_button(
-            label="📥 Download Report",
-            data=download_response.content,
-            file_name=filename,
-            mime=(
-                "text/plain"
-                if report_format == "Markdown"
-                else "text/html" if report_format == "HTML" else "application/pdf"
-            ),
-        )
+        trigger_download(download_response.content, filename, mime_type)
 
     except requests.exceptions.HTTPError as http_err:
         st.error(f"HTTP error during report generation: {http_err}")
@@ -231,8 +252,8 @@ def generate_report_and_download(report_format: str):
 
 
 if analysis_performed:
-    if st.sidebar.button("📥 Generate Report"):
-        with st.spinner("Generating report..."):
+    if st.sidebar.button("📥 Download Report"):
+        with st.spinner("Generating and downloading report..."):
             generate_report_and_download(report_format)
 
 
