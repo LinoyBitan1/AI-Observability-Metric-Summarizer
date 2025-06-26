@@ -9,6 +9,10 @@ import os
 import json
 import re
 from typing import List, Dict, Any, Optional
+import markdown
+from fpdf import FPDF
+import uuid
+import pdfkit
 
 app = FastAPI()
 
@@ -150,6 +154,7 @@ class ReportRequest(BaseModel):
     health_prompt: Optional[str] = None
     llm_summary: Optional[str] = None
     metrics_data: Optional[Dict[str, Any]] = None
+    trend_chart_image: Optional[str] = None
 
 
 # --- Helpers ---
@@ -741,7 +746,6 @@ def chat_metrics(req: ChatMetricsRequest):
 @app.post("/generate_report")
 def generate_report(request: ReportRequest):
     """Generate report in requested format"""
-
     # Check if we have analysis data from UI session
     if (
         request.health_prompt is None
@@ -752,10 +756,9 @@ def generate_report(request: ReportRequest):
             status_code=400,
             detail="No analysis data provided. Please run analysis first.",
         )
-
     metrics_data = request.metrics_data
     summary = request.llm_summary
-
+    trend_chart_image = request.trend_chart_image
     # Create Report with all required details
     match request.format.lower():
         case "html":
@@ -766,6 +769,7 @@ def generate_report(request: ReportRequest):
                 request.start_ts,
                 request.end_ts,
                 request.summarize_model_id,
+                trend_chart_image,
             )
         case "pdf":
             report_content = generate_pdf_report(
@@ -775,6 +779,7 @@ def generate_report(request: ReportRequest):
                 request.start_ts,
                 request.end_ts,
                 request.summarize_model_id,
+                trend_chart_image,
             )
         case "markdown":
             report_content = generate_markdown_report(
@@ -784,12 +789,12 @@ def generate_report(request: ReportRequest):
                 request.start_ts,
                 request.end_ts,
                 request.summarize_model_id,
+                trend_chart_image,
             )
         case _:
             raise HTTPException(
                 status_code=400, detail=f"Unsupported format: {request.format}"
             )
-
     # Save and send
     report_id = save_report(report_content, request.format)
     return {"report_id": report_id, "download_url": f"/download_report/{report_id}"}
@@ -802,27 +807,70 @@ def download_report(report_id: str):
     return FileResponse(report_path)
 
 
-def save_report(report_content: str, format: str) -> str:
-    """Save report content and return report ID"""
-    import uuid
-    import os
+def generate_pdf_report(
+    metrics_data: Dict[str, Any],
+    summary: str,
+    model_name: str,
+    start_ts: int,
+    end_ts: int,
+    summarize_model_id: str,
+    trend_chart_image: Optional[str] = None,
+) -> bytes:
+    """Generate PDF report using pdfkit"""
+    # Generate HTML content first
+    html_content = generate_html_report(
+        metrics_data,
+        summary,
+        model_name,
+        start_ts,
+        end_ts,
+        summarize_model_id,
+        trend_chart_image,
+    )
 
+    try:
+        # Configure pdfkit options for better emoji support
+        options = {
+            "encoding": "UTF-8",
+            "enable-local-file-access": None,
+            "no-stop-slow-scripts": None,
+            "javascript-delay": "1000",
+            "page-size": "A4",
+            "margin-top": "0.75in",
+            "margin-right": "0.75in",
+            "margin-bottom": "0.75in",
+            "margin-left": "0.75in",
+        }
+
+        # Convert HTML to PDF using pdfkit with options
+        pdf_bytes = pdfkit.from_string(html_content, False, options=options)
+        return pdf_bytes
+    except Exception as e:
+        print(f"Error generating PDF with pdfkit: {e}")
+        # Fallback to HTML content as string
+        return html_content.encode("utf-8")
+
+
+def save_report(report_content, format: str) -> str:
     report_id = str(uuid.uuid4())
     reports_dir = "/tmp/reports"
     os.makedirs(reports_dir, exist_ok=True)
 
-    file_extension = format.lower()
-    report_path = os.path.join(reports_dir, f"{report_id}.{file_extension}")
+    report_path = os.path.join(reports_dir, f"{report_id}.{format.lower()}")
 
-    with open(report_path, "w") as f:
-        f.write(report_content)
+    # Handle both string and bytes content
+    if isinstance(report_content, bytes):
+        with open(report_path, "wb") as f:
+            f.write(report_content)
+    else:
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report_content)
 
     return report_id
 
 
 def get_report_path(report_id: str) -> str:
     """Get file path for report ID"""
-    import os
 
     reports_dir = "/tmp/reports"
 
@@ -841,31 +889,50 @@ def generate_html_report(
     start_ts: int,
     end_ts: int,
     summarize_model_id: str,
+    trend_chart_image: Optional[str] = None,
 ) -> str:
     """Generate HTML report with all requested details"""
     start_date = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M:%S")
     end_date = datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M:%S")
 
+    # Convert markdown summary to HTML
+    summary_html = markdown.markdown(summary, extensions=["extra"])
+
     html_content = f"""
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
     <title>AI Metrics Report</title>
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 40px; }}
-        .header {{ background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin-bottom: 30px; }}
-        .section {{ margin-bottom: 30px; }}
-        .metric {{ background-color: #f9f9f9; padding: 15px; margin: 10px 0; border-left: 4px solid #007bff; }}
-        .summary {{ background-color: #e7f3ff; padding: 20px; border-radius: 5px; }}
-        .dashboard {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0; }}
-        .metric-card {{ background-color: #f8f9fa; padding: 15px; border-radius: 5px; border: 1px solid #dee2e6; }}
-        .metric-value {{ font-size: 24px; font-weight: bold; color: #007bff; }}
-        .metric-label {{ font-size: 14px; color: #6c757d; margin-bottom: 5px; }}
-        .metric-delta {{ font-size: 12px; color: #28a745; }}
-        table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-        th {{ background-color: #f2f2f2; }}
-        .chart-container {{ margin: 20px 0; padding: 20px; background-color: #f8f9fa; border-radius: 5px; }}
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+    html, body, [class*="css"] {{ font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif; }}
+    body {{ margin: 40px; font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif; }}
+    h1, h2, h3, h4 {{ font-weight: 600; color: #1c1c1e; letter-spacing: -0.5px; }}
+    .stMetric {{ border-radius: 12px; background-color: #f9f9f9; padding: 1em; box-shadow: 0 2px 8px rgba(0,0,0,0.05); color: #1c1c1e !important; }}
+    [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {{ color: #1c1c1e !important; font-weight: 600; }}
+    .block-container {{ padding-top: 2rem; }}
+    .stButton>button {{ border-radius: 8px; padding: 0.5em 1.2em; font-size: 1em; }}
+    footer, header {{ visibility: hidden; }}
+    
+    /* Additional styles for HTML report */
+    .header {{ background-color: #e7f3ff; padding: 20px; border-radius: 5px; margin-bottom: 30px; }}
+    .section {{ margin-bottom: 30px; }}
+    .summary {{ background-color: #f9f9f9; padding: 24px 28px; border-radius: 7px; font-size: 0.9em; line-height: 1.3; margin-bottom: 10px; color: #1c1c1e; }}
+    .summary p {{ margin: 0 0 8px 0; }}
+    .summary ul, .summary ol {{ margin: 4px 0; padding-left: 20px; }}
+    .summary li {{ margin: 2px 0; }}
+    .dashboard {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0; }}
+    .metric-card {{ border-radius: 12px; background-color: #f9f9f9; padding: 1em; box-shadow: 0 2px 8px rgba(0,0,0,0.05); color: #1c1c1e; }}
+    .metric-value {{ font-size: 24px; font-weight: 600; color: #1c1c1e; }}
+    .metric-label {{ font-size: 14px; color: #6c757d; margin-bottom: 5px; }}
+    .metric-delta {{ font-size: 12px; color: #28a745; }}
+    table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+    th {{ background-color: #f2f2f2; }}
+    .chart-container {{ margin: 20px 0; padding: 20px; background-color: #f8f9fa; border-radius: 5px; text-align: center; }}
+    .chart-container img {{ max-width: 100%; height: auto; display: block; margin: 0 auto; }}
+    p, div, span {{ font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif; }}
     </style>
 </head>
 <body>
@@ -886,7 +953,7 @@ def generate_html_report(
     <div class="section">
         <h2>🧠 Model Insights Summary</h2>
         <div class="summary">
-            {summary}
+            {summary_html}
         </div>
     </div>
     
@@ -934,53 +1001,14 @@ def generate_html_report(
     <div class="section">
         <h2>📈 Trend Over Time</h2>
         <div class="chart-container">
-            <h3>GPU Usage (%) and P95 Latency (s) Trends</h3>
 """
-
-    # Add trend data for key metrics
-    trend_metrics = ["GPU Usage (%)", "P95 Latency (s)"]
-    for metric_name in trend_metrics:
-        data = metrics_data.get(metric_name, [])
-        if data:
-            html_content += f"""
-        <div class="metric">
-            <h4>{metric_name}</h4>
-            <table>
-                <tr><th>Timestamp</th><th>Value</th></tr>
-"""
-            for point in data[:20]:  # Show first 20 data points
-                timestamp = point["timestamp"]
-                value = point["value"]
-                html_content += f"<tr><td>{timestamp}</td><td>{value:.2f}</td></tr>"
-
-            html_content += """
-            </table>
-        </div>
-"""
+    if trend_chart_image:
+        html_content += f'<img src="data:image/png;base64,{trend_chart_image}" alt="Trend Over Time Chart" style="max-width:100%;height:auto;"/>'
 
     html_content += """
         </div>
     </div>
     
-"""
-
-    # Add detailed metrics data
-    for metric_name, data in metrics_data.items():
-        if data:
-            html_content += f"""
-        <div class="metric">
-            <h3>{metric_name}</h3>
-            <table>
-                <tr><th>Timestamp</th><th>Value</th></tr>
-"""
-            for point in data[:10]:  # Show first 10 data points
-                timestamp = point["timestamp"]
-                value = point["value"]
-                html_content += f"<tr><td>{timestamp}</td><td>{value:.2f}</td></tr>"
-
-            html_content += """
-            </table>
-        </div>
 """
 
     html_content += """
@@ -991,21 +1019,6 @@ def generate_html_report(
     return html_content
 
 
-def generate_pdf_report(
-    metrics_data: Dict[str, Any],
-    summary: str,
-    model_name: str,
-    start_ts: int,
-    end_ts: int,
-    summarize_model_id: str,
-) -> str:
-    """Generate PDF report (returns HTML that can be converted to PDF)"""
-    # For simplicity, return HTML that can be converted to PDF
-    return generate_html_report(
-        metrics_data, summary, model_name, start_ts, end_ts, summarize_model_id
-    )
-
-
 def generate_markdown_report(
     metrics_data: Dict[str, Any],
     summary: str,
@@ -1013,11 +1026,11 @@ def generate_markdown_report(
     start_ts: int,
     end_ts: int,
     summarize_model_id: str,
+    trend_chart_image: Optional[str] = None,
 ) -> str:
     """Generate Markdown report"""
     start_date = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M:%S")
     end_date = datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M:%S")
-
     markdown_content = f"""# 📊 AI Model Metrics Report
 
 **Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -1032,7 +1045,7 @@ def generate_markdown_report(
 
 ## 🧠 Model Insights Summary
 
-{summary}
+{summary.strip()}
 
 ## 📊 Metric Dashboard
 
@@ -1048,8 +1061,8 @@ def generate_markdown_report(
         "Inference Time (s)",
     ]
 
-    markdown_content += "| Metric | Average Value | Max Value |\n"
-    markdown_content += "|--------|---------------|-----------|\n"
+    markdown_content += "| Metric                | Average Value | Max Value     |\n"
+    markdown_content += "| --------------------- | ------------- | ------------- |\n"
 
     for metric_name in key_metrics:
         data = metrics_data.get(metric_name, [])
@@ -1061,22 +1074,9 @@ def generate_markdown_report(
         else:
             markdown_content += f"| {metric_name} | N/A | N/A |\n"
 
-    markdown_content += "\n## 📈 Trend Over Time\n\n"
-
-    # Add trend data for key metrics
-    trend_metrics = ["GPU Usage (%)", "P95 Latency (s)"]
-    for metric_name in trend_metrics:
-        data = metrics_data.get(metric_name, [])
-        if data:
-            markdown_content += f"### {metric_name}\n\n"
-            markdown_content += "| Timestamp | Value |\n"
-            markdown_content += "|-----------|-------|\n"
-
-            for point in data[:20]:  # Show first 20 data points
-                timestamp = point["timestamp"]
-                value = point["value"]
-                markdown_content += f"| {timestamp} | {value:.2f} |\n"
-
-            markdown_content += "\n"
-
+    markdown_content += "\n## 📈 Trend Over Time\n"
+    if trend_chart_image:
+        markdown_content += (
+            f"![Trend Chart](data:image/png;base64,{trend_chart_image})\n"
+        )
     return markdown_content

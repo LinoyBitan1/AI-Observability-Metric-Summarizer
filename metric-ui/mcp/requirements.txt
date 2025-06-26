@@ -4,3 +4,6 @@ requests
 scipy
 pandas
 uvicorn
+markdown
+fpdf
+pdfkit

@@ -1,6 +1,6 @@
 image:
   repository: quay.io/rh-ee-lbitan/metric-ui
-  tag: report-test13
+  tag: test-report-dev-128
   pullPolicy: IfNotPresent
 
 service:

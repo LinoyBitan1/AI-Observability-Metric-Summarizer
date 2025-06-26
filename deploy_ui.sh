@@ -6,7 +6,7 @@ set -e
 # Configuration
 UI_IMAGE="quay.io/rh-ee-lbitan/metric-ui"
 NAMESPACE="linoy-metrics-summarizer-report"
-TAG=test-report-2  # Use timestamp as tag
+TAG=test-report-dev-128  # Use timestamp as tag
 
 echo "🚀 Starting UI deployment process..."
 

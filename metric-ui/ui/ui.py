@@ -6,6 +6,8 @@ import pandas as pd
 import os
 import streamlit.components.v1 as components
 import base64
+import matplotlib.pyplot as plt
+import io
 
 # --- Config ---
 API_URL = os.getenv("MCP_API_URL", "http://localhost:8000")
@@ -212,39 +214,66 @@ def trigger_download(
 def generate_report_and_download(report_format: str):
     try:
         analysis_params = st.session_state["analysis_params"]
-
+        # --- Save Trend Over Time chart as image ---
+        metric_data = st.session_state.get("metric_data", {})
+        dfs = []
+        for label in ["GPU Usage (%)", "P95 Latency (s)"]:
+            raw_data = metric_data.get(label, [])
+            if raw_data:
+                try:
+                    timestamps = [
+                        datetime.fromisoformat(p["timestamp"]) for p in raw_data
+                    ]
+                    values = [p["value"] for p in raw_data]
+                    df = pd.DataFrame({label: values}, index=timestamps)
+                    dfs.append(df)
+                except Exception:
+                    pass
+        trend_chart_image_b64 = None
+        if dfs:
+            chart_df = pd.concat(dfs, axis=1).fillna(0)
+            fig, ax = plt.subplots(figsize=(8, 4))
+            chart_df.plot(ax=ax)
+            ax.set_title("Trend Over Time")
+            ax.set_xlabel("Timestamp")
+            ax.set_ylabel("Value")
+            plt.tight_layout()
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png")
+            plt.close(fig)
+            buf.seek(0)
+            trend_chart_image_b64 = base64.b64encode(buf.read()).decode("utf-8")
+        # --- End chart image save ---
+        payload = {
+            "model_name": analysis_params["model_name"],
+            "start_ts": analysis_params["start_ts"],
+            "end_ts": analysis_params["end_ts"],
+            "summarize_model_id": analysis_params["summarize_model_id"],
+            "format": report_format,
+            "api_key": analysis_params["api_key"],
+            "health_prompt": st.session_state["prompt"],
+            "llm_summary": st.session_state["summary"],
+            "metrics_data": st.session_state["metric_data"],
+        }
+        if trend_chart_image_b64:
+            payload["trend_chart_image"] = trend_chart_image_b64
         response = requests.post(
             f"{API_URL}/generate_report",
-            json={
-                "model_name": analysis_params["model_name"],
-                "start_ts": analysis_params["start_ts"],
-                "end_ts": analysis_params["end_ts"],
-                "summarize_model_id": analysis_params["summarize_model_id"],
-                "format": report_format,
-                "api_key": analysis_params["api_key"],
-                "health_prompt": st.session_state["prompt"],
-                "llm_summary": st.session_state["summary"],
-                "metrics_data": st.session_state["metric_data"],
-            },
+            json=payload,
         )
         response.raise_for_status()
         report_id = response.json()["report_id"]
         st.success(f"✅ Report generated! ID: {report_id}")
-
         download_response = requests.get(f"{API_URL}/download_report/{report_id}")
         download_response.raise_for_status()
-
         mime_map = {
             "HTML": "text/html",
             "PDF": "application/pdf",
             "Markdown": "text/markdown",
         }
         mime_type = mime_map.get(report_format, "application/octet-stream")
-
         filename = f"ai_metrics_report.{report_format.lower()}"
-
         trigger_download(download_response.content, filename, mime_type)
-
     except requests.exceptions.HTTPError as http_err:
         st.error(f"HTTP error during report generation: {http_err}")
     except Exception as e:
