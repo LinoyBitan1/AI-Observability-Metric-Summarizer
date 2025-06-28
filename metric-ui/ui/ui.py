@@ -263,7 +263,6 @@ def generate_report_and_download(report_format: str):
         )
         response.raise_for_status()
         report_id = response.json()["report_id"]
-        st.success(f"✅ Report generated! ID: {report_id}")
         download_response = requests.get(f"{API_URL}/download_report/{report_id}")
         download_response.raise_for_status()
         mime_map = {
@@ -282,7 +281,7 @@ def generate_report_and_download(report_format: str):
 
 if analysis_performed:
     if st.sidebar.button("📥 Download Report"):
-        with st.spinner("Generating and downloading report..."):
+        with st.spinner("Downloading report..."):
             generate_report_and_download(report_format)
 
 

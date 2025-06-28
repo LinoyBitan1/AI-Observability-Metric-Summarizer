@@ -14,6 +14,26 @@ from fpdf import FPDF
 import uuid
 import pdfkit
 
+
+# --- Report Schema Models ---
+class MetricCard(BaseModel):
+    name: str
+    avg: Optional[float]
+    max: Optional[float]
+    values: List[Dict[str, Any]]
+
+
+class ReportSchema(BaseModel):
+    generated_at: str
+    model_name: str
+    start_date: str
+    end_date: str
+    summarize_model_id: str
+    summary: str
+    metrics: List[MetricCard]
+    trend_chart_image: Optional[str] = None
+
+
 app = FastAPI()
 
 # --- CONFIG ---
@@ -756,45 +776,31 @@ def generate_report(request: ReportRequest):
             status_code=400,
             detail="No analysis data provided. Please run analysis first.",
         )
-    metrics_data = request.metrics_data
-    summary = request.llm_summary
-    trend_chart_image = request.trend_chart_image
-    # Create Report with all required details
+
+    # Build the unified report schema once
+    report_schema = build_report_schema(
+        request.metrics_data,
+        request.llm_summary,
+        request.model_name,
+        request.start_ts,
+        request.end_ts,
+        request.summarize_model_id,
+        request.trend_chart_image,
+    )
+
+    # Generate report content based on format
     match request.format.lower():
         case "html":
-            report_content = generate_html_report(
-                metrics_data,
-                summary,
-                request.model_name,
-                request.start_ts,
-                request.end_ts,
-                request.summarize_model_id,
-                trend_chart_image,
-            )
+            report_content = generate_html_report(report_schema)
         case "pdf":
-            report_content = generate_pdf_report(
-                metrics_data,
-                summary,
-                request.model_name,
-                request.start_ts,
-                request.end_ts,
-                request.summarize_model_id,
-                trend_chart_image,
-            )
+            report_content = generate_pdf_report(report_schema)
         case "markdown":
-            report_content = generate_markdown_report(
-                metrics_data,
-                summary,
-                request.model_name,
-                request.start_ts,
-                request.end_ts,
-                request.summarize_model_id,
-                trend_chart_image,
-            )
+            report_content = generate_markdown_report(report_schema)
         case _:
             raise HTTPException(
                 status_code=400, detail=f"Unsupported format: {request.format}"
             )
+
     # Save and send
     report_id = save_report(report_content, request.format)
     return {"report_id": report_id, "download_url": f"/download_report/{report_id}"}
@@ -807,26 +813,10 @@ def download_report(report_id: str):
     return FileResponse(report_path)
 
 
-def generate_pdf_report(
-    metrics_data: Dict[str, Any],
-    summary: str,
-    model_name: str,
-    start_ts: int,
-    end_ts: int,
-    summarize_model_id: str,
-    trend_chart_image: Optional[str] = None,
-) -> bytes:
+def generate_pdf_report(report_schema: ReportSchema) -> bytes:
     """Generate PDF report using pdfkit"""
-    # Generate HTML content first
-    html_content = generate_html_report(
-        metrics_data,
-        summary,
-        model_name,
-        start_ts,
-        end_ts,
-        summarize_model_id,
-        trend_chart_image,
-    )
+    # Generate HTML content first using the schema
+    html_content = generate_html_report(report_schema)
 
     try:
         # Configure pdfkit options for better emoji support
@@ -882,21 +872,10 @@ def get_report_path(report_id: str) -> str:
     raise FileNotFoundError(f"Report {report_id} not found")
 
 
-def generate_html_report(
-    metrics_data: Dict[str, Any],
-    summary: str,
-    model_name: str,
-    start_ts: int,
-    end_ts: int,
-    summarize_model_id: str,
-    trend_chart_image: Optional[str] = None,
-) -> str:
-    """Generate HTML report with all requested details"""
-    start_date = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M:%S")
-    end_date = datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M:%S")
-
+def generate_html_report(report_schema: ReportSchema) -> str:
+    """Generate HTML report from unified schema"""
     # Convert markdown summary to HTML
-    summary_html = markdown.markdown(summary, extensions=["extra"])
+    summary_html = markdown.markdown(report_schema.summary, extensions=["extra"])
 
     html_content = f"""
 <!DOCTYPE html>
@@ -929,7 +908,7 @@ def generate_html_report(
     .metric-delta {{ font-size: 12px; color: #28a745; }}
     table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
     th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-    th {{ background-color: #f2f2f2; }}
+    th {{ background-color: #f9f9f9; }}
     .chart-container {{ margin: 20px 0; padding: 20px; background-color: #f8f9fa; border-radius: 5px; text-align: center; }}
     .chart-container img {{ max-width: 100%; height: auto; display: block; margin: 0 auto; }}
     p, div, span {{ font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif; }}
@@ -938,15 +917,15 @@ def generate_html_report(
 <body>
     <div class="header">
         <h1>📊 AI Model Metrics Report</h1>
-        <p><strong>Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+        <p><strong>Generated:</strong> {report_schema.generated_at}</p>
     </div>
     
     <div class="section">
         <h2>📋 Report Details</h2>
         <table>
-            <tr><th>Model Selected for Analysis</th><td>{model_name}</td></tr>
-            <tr><th>Investment Range (Time Period)</th><td>{start_date} to {end_date}</td></tr>
-            <tr><th>Summarize Model Chosen</th><td>{summarize_model_id}</td></tr>
+            <tr><th>Model Selected for Analysis</th><td>{report_schema.model_name}</td></tr>
+            <tr><th>Investment Range (Time Period)</th><td>{report_schema.start_date} to {report_schema.end_date}</td></tr>
+            <tr><th>Summarize Model Chosen</th><td>{report_schema.summarize_model_id}</td></tr>
         </table>
     </div>
     
@@ -962,33 +941,20 @@ def generate_html_report(
         <div class="dashboard">
 """
 
-    # Add metric cards similar to UI
-    key_metrics = [
-        "Prompt Tokens Created",
-        "P95 Latency (s)",
-        "Requests Running",
-        "GPU Usage (%)",
-        "Output Tokens Created",
-        "Inference Time (s)",
-    ]
-
-    for metric_name in key_metrics:
-        data = metrics_data.get(metric_name, [])
-        if data:
-            values = [point["value"] for point in data]
-            avg_val = sum(values) / len(values)
-            max_val = max(values)
+    # Add metric cards from schema
+    for metric in report_schema.metrics:
+        if metric.avg is not None and metric.max is not None:
             html_content += f"""
         <div class="metric-card">
-            <div class="metric-label">{metric_name}</div>
-            <div class="metric-value">{avg_val:.2f}</div>
-            <div class="metric-delta">↑ Max: {max_val:.2f}</div>
+            <div class="metric-label">{metric.name}</div>
+            <div class="metric-value">{metric.avg:.2f}</div>
+            <div class="metric-delta">↑ Max: {metric.max:.2f}</div>
         </div>
 """
         else:
             html_content += f"""
         <div class="metric-card">
-            <div class="metric-label">{metric_name}</div>
+            <div class="metric-label">{metric.name}</div>
             <div class="metric-value">N/A</div>
             <div class="metric-delta">No data</div>
         </div>
@@ -1002,8 +968,8 @@ def generate_html_report(
         <h2>📈 Trend Over Time</h2>
         <div class="chart-container">
 """
-    if trend_chart_image:
-        html_content += f'<img src="data:image/png;base64,{trend_chart_image}" alt="Trend Over Time Chart" style="max-width:100%;height:auto;"/>'
+    if report_schema.trend_chart_image:
+        html_content += f'<img src="data:image/png;base64,{report_schema.trend_chart_image}" alt="Trend Over Time Chart" style="max-width:100%;height:auto;"/>'
 
     html_content += """
         </div>
@@ -1019,7 +985,62 @@ def generate_html_report(
     return html_content
 
 
-def generate_markdown_report(
+def generate_markdown_report(report_schema: ReportSchema) -> str:
+    """Generate Markdown report from unified schema"""
+
+    # Escape pipe characters and other markdown special characters in table content
+    def escape_markdown_table_content(text: str) -> str:
+        return text.replace("|", "\\|").replace("\n", " ")
+
+    escaped_model_name = escape_markdown_table_content(report_schema.model_name)
+    escaped_summarize_model = escape_markdown_table_content(
+        report_schema.summarize_model_id
+    )
+    escaped_date_range = escape_markdown_table_content(
+        f"{report_schema.start_date} to {report_schema.end_date}"
+    )
+
+    markdown_content = f"""# 📊 AI Model Metrics Report
+
+**Generated:** {report_schema.generated_at}
+
+## 📋 Report Details
+
+| Field | Value |
+|-------|-------|
+| **Model Selected for Analysis** | {escaped_model_name} |
+| **Investment Range (Time Period)** | {escaped_date_range} |
+| **Summarize Model Chosen** | {escaped_summarize_model} |
+
+## 🧠 Model Insights Summary
+
+{report_schema.summary.strip()}
+
+## 📊 Metric Dashboard
+
+"""
+
+    markdown_content += "| Metric | Average Value | Max Value |\n"
+    markdown_content += "|--------|---------------|-----------|\n"
+
+    for metric in report_schema.metrics:
+        escaped_metric_name = escape_markdown_table_content(metric.name)
+        if metric.avg is not None and metric.max is not None:
+            markdown_content += (
+                f"| {escaped_metric_name} | {metric.avg:.2f} | {metric.max:.2f} |\n"
+            )
+        else:
+            markdown_content += f"| {escaped_metric_name} | N/A | N/A |\n"
+
+    markdown_content += "\n## 📈 Trend Over Time\n"
+    if report_schema.trend_chart_image:
+        markdown_content += (
+            f"![Trend Chart](data:image/png;base64,{report_schema.trend_chart_image})\n"
+        )
+    return markdown_content
+
+
+def build_report_schema(
     metrics_data: Dict[str, Any],
     summary: str,
     model_name: str,
@@ -1027,31 +1048,9 @@ def generate_markdown_report(
     end_ts: int,
     summarize_model_id: str,
     trend_chart_image: Optional[str] = None,
-) -> str:
-    """Generate Markdown report"""
-    start_date = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M:%S")
-    end_date = datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M:%S")
-    markdown_content = f"""# 📊 AI Model Metrics Report
+) -> ReportSchema:
+    from datetime import datetime
 
-**Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-## 📋 Report Details
-
-| Field | Value |
-|-------|-------|
-| **Model Selected for Analysis** | {model_name} |
-| **Investment Range (Time Period)** | {start_date} to {end_date} |
-| **Summarize Model Chosen** | {summarize_model_id} |
-
-## 🧠 Model Insights Summary
-
-{summary.strip()}
-
-## 📊 Metric Dashboard
-
-"""
-
-    # Add metric cards similar to UI
     key_metrics = [
         "Prompt Tokens Created",
         "P95 Latency (s)",
@@ -1060,23 +1059,31 @@ def generate_markdown_report(
         "Output Tokens Created",
         "Inference Time (s)",
     ]
-
-    markdown_content += "| Metric                | Average Value | Max Value     |\n"
-    markdown_content += "| --------------------- | ------------- | ------------- |\n"
-
+    metric_cards = []
     for metric_name in key_metrics:
         data = metrics_data.get(metric_name, [])
         if data:
             values = [point["value"] for point in data]
-            avg_val = sum(values) / len(values)
-            max_val = max(values)
-            markdown_content += f"| {metric_name} | {avg_val:.2f} | {max_val:.2f} |\n"
+            avg_val = sum(values) / len(values) if values else None
+            max_val = max(values) if values else None
         else:
-            markdown_content += f"| {metric_name} | N/A | N/A |\n"
-
-    markdown_content += "\n## 📈 Trend Over Time\n"
-    if trend_chart_image:
-        markdown_content += (
-            f"![Trend Chart](data:image/png;base64,{trend_chart_image})\n"
+            avg_val = None
+            max_val = None
+        metric_cards.append(
+            MetricCard(
+                name=metric_name,
+                avg=avg_val,
+                max=max_val,
+                values=data,
+            )
         )
-    return markdown_content
+    return ReportSchema(
+        generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        model_name=model_name,
+        start_date=datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M:%S"),
+        end_date=datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M:%S"),
+        summarize_model_id=summarize_model_id,
+        summary=summary,
+        metrics=metric_cards,
+        trend_chart_image=trend_chart_image,
+    )
