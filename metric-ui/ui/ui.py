@@ -281,8 +281,10 @@ def generate_report_and_download(report_format: str):
 
 if analysis_performed:
     if st.sidebar.button("📥 Download Report"):
-        with st.spinner("Downloading report..."):
-            generate_report_and_download(report_format)
+        spinner_placeholder = st.sidebar.empty()
+        with spinner_placeholder.container():
+            with st.spinner("Generating and downloading report..."):
+                generate_report_and_download(report_format)
 
 
 # --- 📊 Metric Summarizer Page ---

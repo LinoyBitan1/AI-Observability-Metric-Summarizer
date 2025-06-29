@@ -1,3 +1,4 @@
+import base64
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -877,111 +878,234 @@ def generate_html_report(report_schema: ReportSchema) -> str:
     # Convert markdown summary to HTML
     summary_html = markdown.markdown(report_schema.summary, extensions=["extra"])
 
-    html_content = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>AI Metrics Report</title>
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
-    html, body, [class*="css"] {{ font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif; }}
-    body {{ margin: 40px; font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif; }}
-    h1, h2, h3, h4 {{ font-weight: 600; color: #1c1c1e; letter-spacing: -0.5px; }}
-    .stMetric {{ border-radius: 12px; background-color: #f9f9f9; padding: 1em; box-shadow: 0 2px 8px rgba(0,0,0,0.05); color: #1c1c1e !important; }}
-    [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {{ color: #1c1c1e !important; font-weight: 600; }}
-    .block-container {{ padding-top: 2rem; }}
-    .stButton>button {{ border-radius: 8px; padding: 0.5em 1.2em; font-size: 1em; }}
-    footer, header {{ visibility: hidden; }}
-    
-    /* Additional styles for HTML report */
-    .header {{ background-color: #e7f3ff; padding: 20px; border-radius: 5px; margin-bottom: 30px; }}
-    .section {{ margin-bottom: 30px; }}
-    .summary {{ background-color: #f9f9f9; padding: 24px 28px; border-radius: 7px; font-size: 0.9em; line-height: 1.3; margin-bottom: 10px; color: #1c1c1e; }}
-    .summary p {{ margin: 0 0 8px 0; }}
-    .summary ul, .summary ol {{ margin: 4px 0; padding-left: 20px; }}
-    .summary li {{ margin: 2px 0; }}
-    .dashboard {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0; }}
-    .metric-card {{ border-radius: 12px; background-color: #f9f9f9; padding: 1em; box-shadow: 0 2px 8px rgba(0,0,0,0.05); color: #1c1c1e; }}
-    .metric-value {{ font-size: 24px; font-weight: 600; color: #1c1c1e; }}
-    .metric-label {{ font-size: 14px; color: #6c757d; margin-bottom: 5px; }}
-    .metric-delta {{ font-size: 12px; color: #28a745; }}
-    table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-    th {{ background-color: #f9f9f9; }}
-    .chart-container {{ margin: 20px 0; padding: 20px; background-color: #f8f9fa; border-radius: 5px; text-align: center; }}
-    .chart-container img {{ max-width: 100%; height: auto; display: block; margin: 0 auto; }}
-    p, div, span {{ font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif; }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>📊 AI Model Metrics Report</h1>
-        <p><strong>Generated:</strong> {report_schema.generated_at}</p>
-    </div>
-    
-    <div class="section">
-        <h2>📋 Report Details</h2>
-        <table>
-            <tr><th>Model Selected for Analysis</th><td>{report_schema.model_name}</td></tr>
-            <tr><th>Investment Range (Time Period)</th><td>{report_schema.start_date} to {report_schema.end_date}</td></tr>
-            <tr><th>Summarize Model Chosen</th><td>{report_schema.summarize_model_id}</td></tr>
-        </table>
-    </div>
-    
-    <div class="section">
-        <h2>🧠 Model Insights Summary</h2>
-        <div class="summary">
-            {summary_html}
+    html_content = f""" 
+    <!DOCTYPE html> 
+    <html> 
+    <head> 
+        <meta charset="UTF-8"> 
+        <title>AI Metrics Report</title> 
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+        
+        html, body, [class*="css"] {{
+            font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        }}
+        
+        body {{
+            margin: 40px;
+        }}
+
+        h1, h2, h3, h4 {{
+            font-weight: 600;
+            color: #1c1c1e;
+            letter-spacing: -0.5px;
+        }}
+
+        .stMetric {{
+            border-radius: 12px;
+            background-color: #f1f1f1;
+            padding: 1em;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            color: #1c1c1e !important;
+        }}
+
+        [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {{
+            color: #1c1c1e !important;
+            font-weight: 600;
+        }}
+
+        .block-container {{
+            padding-top: 2rem;
+        }}
+
+        .stButton>button {{
+            border-radius: 8px;
+            padding: 0.5em 1.2em;
+            font-size: 1em;
+        }}
+
+        footer, header {{
+            visibility: hidden;
+        }}
+
+        /* Additional styles for HTML report */
+        .header {{
+            background-color: #e7f3ff;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 30px;
+            page-break-inside: avoid;
+        }}
+
+        .section {{
+            margin-bottom: 30px;
+            page-break-inside: avoid;
+            break-inside: avoid;
+        }}
+
+        .summary {{
+            background-color: #f1f1f1;
+            padding: 24px 28px;
+            border-radius: 7px;
+            font-size: 0.9em;
+            line-height: 1.3;
+            margin-bottom: 10px;
+            color: #1c1c1e;
+            page-break-inside: avoid;
+        }}
+
+        .summary p {{
+            margin: 0 0 8px 0;
+        }}
+
+        .summary ul, .summary ol {{
+            margin: 4px 0;
+            padding-left: 20px;
+        }}
+
+        .summary li {{
+            margin: 2px 0;
+        }}
+
+        .dashboard {{
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin: 20px 0;
+            page-break-inside: avoid;
+        }}
+
+        .metric-card {{
+            border-radius: 12px;
+            background-color: #f1f1f1;
+            padding: 1em;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            color: #1c1c1e;
+            page-break-inside: avoid;
+            margin-bottom: 1em;
+        }}
+
+        .metric-value {{
+            font-size: 24px;
+            font-weight: 600;
+            color: #1c1c1e;
+        }}
+
+        .metric-label {{
+            font-size: 14px;
+            color: #6c757d;
+            margin-bottom: 5px;
+        }}
+
+        .metric-delta {{
+            font-size: 12px;
+            color: #28a745;
+        }}
+
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            page-break-inside: avoid;
+        }}
+
+        th, td {{
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }}
+
+        th {{
+            background-color: #f1f1f1;
+        }}
+
+        .chart-container {{
+            margin: 20px 0;
+            padding: 20px;
+            background-color: #f1f1f1;
+            border-radius: 5px;
+            text-align: center;
+            page-break-inside: avoid;
+        }}
+
+        .chart-container img {{
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 0 auto;
+            page-break-inside: avoid;
+        }}
+
+        p, div, span {{
+            font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        }}
+        </style> 
+    </head> 
+    <body> 
+        <div class="header">
+            <h1>📊 AI Model Metrics Report</h1>
+            <p><strong>Generated:</strong> {report_schema.generated_at}</p>
         </div>
-    </div>
-    
-    <div class="section">
-        <h2>📊 Metric Dashboard</h2>
-        <div class="dashboard">
-"""
+
+        <div class="section">
+            <h2>📋 Report Details</h2>
+            <table>
+                <tr><th>Model Selected for Analysis</th><td>{report_schema.model_name}</td></tr>
+                <tr><th>Investment Range (Time Period)</th><td>{report_schema.start_date} to {report_schema.end_date}</td></tr>
+                <tr><th>Summarize Model Chosen</th><td>{report_schema.summarize_model_id}</td></tr>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2>🧠 Model Insights Summary</h2>
+            <div class="summary">
+                {summary_html}
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>📊 Metric Dashboard</h2>
+            <div class="dashboard">
+    """
 
     # Add metric cards from schema
     for metric in report_schema.metrics:
         if metric.avg is not None and metric.max is not None:
-            html_content += f"""
-        <div class="metric-card">
-            <div class="metric-label">{metric.name}</div>
-            <div class="metric-value">{metric.avg:.2f}</div>
-            <div class="metric-delta">↑ Max: {metric.max:.2f}</div>
-        </div>
-"""
+            html_content += f""" 
+                <div class="metric-card">
+                    <div class="metric-label">{metric.name}</div>
+                    <div class="metric-value">{metric.avg:.2f}</div>
+                    <div class="metric-delta">↑ Max: {metric.max:.2f}</div>
+                </div>
+    """
         else:
-            html_content += f"""
-        <div class="metric-card">
-            <div class="metric-label">{metric.name}</div>
-            <div class="metric-value">N/A</div>
-            <div class="metric-delta">No data</div>
-        </div>
-"""
+            html_content += f""" 
+                <div class="metric-card">
+                    <div class="metric-label">{metric.name}</div>
+                    <div class="metric-value">N/A</div>
+                    <div class="metric-delta">No data</div>
+                </div>
+    """
 
     html_content += """
+            </div>
         </div>
-    </div>
-    
-    <div class="section">
-        <h2>📈 Trend Over Time</h2>
-        <div class="chart-container">
-"""
+
+        <div class="section">
+            <h2>📈 Trend Over Time</h2>
+            <div class="chart-container">
+    """
+
     if report_schema.trend_chart_image:
-        html_content += f'<img src="data:image/png;base64,{report_schema.trend_chart_image}" alt="Trend Over Time Chart" style="max-width:100%;height:auto;"/>'
+        html_content += f'<img src="data:image/png;base64,{report_schema.trend_chart_image}" alt="Trend Over Time Chart"/>'
 
     html_content += """
+            </div>
         </div>
-    </div>
-    
-"""
+    </body>
+    </html>
+    """
 
-    html_content += """
-    </div>
-</body>
-</html>
-"""
     return html_content
 
 
