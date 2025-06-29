@@ -14,6 +14,13 @@ import markdown
 from fpdf import FPDF
 import uuid
 import pdfkit
+from report_assets.report_renderer import (
+    generate_html_report,
+    generate_markdown_report,
+    generate_pdf_report,
+    ReportSchema,
+    MetricCard,
+)
 
 # Import report configuration and renderer
 import report_assets.report_config as report_config
@@ -167,6 +174,14 @@ class ReportRequest(BaseModel):
     llm_summary: Optional[str] = None
     metrics_data: Optional[Dict[str, Any]] = None
     trend_chart_image: Optional[str] = None
+
+
+class MetricsCalculationRequest(BaseModel):
+    metrics_data: Dict[str, List[Dict[str, Any]]]
+
+
+class MetricsCalculationResponse(BaseModel):
+    calculated_metrics: Dict[str, Dict[str, Optional[float]]]
 
 
 # --- Helpers ---
@@ -755,13 +770,6 @@ def chat_metrics(req: ChatMetricsRequest):
 
 
 # helper functions for report generation
-@app.get("/download_report/{report_id}")
-def download_report(report_id: str):
-    """Download generated report"""
-    report_path = get_report_path(report_id)
-    return FileResponse(report_path)
-
-
 def save_report(report_content, format: str) -> str:
     report_id = str(uuid.uuid4())
     reports_dir = "/tmp/reports"
@@ -793,6 +801,19 @@ def get_report_path(report_id: str) -> str:
     raise FileNotFoundError(f"Report {report_id} not found")
 
 
+def calculate_metric_stats(metric_data):
+    """Calculate average and max values for metrics data"""
+    if not metric_data:
+        return None, None
+    try:
+        values = [point["value"] for point in metric_data]
+        avg_val = sum(values) / len(values) if values else None
+        max_val = max(values) if values else None
+        return avg_val, max_val
+    except Exception:
+        return None, None
+
+
 def build_report_schema(
     metrics_data: Dict[str, Any],
     summary: str,
@@ -809,13 +830,7 @@ def build_report_schema(
     metric_cards = []
     for metric_name in key_metrics:
         data = metrics_data.get(metric_name, [])
-        if data:
-            values = [point["value"] for point in data]
-            avg_val = sum(values) / len(values) if values else None
-            max_val = max(values) if values else None
-        else:
-            avg_val = None
-            max_val = None
+        avg_val, max_val = calculate_metric_stats(data)
         metric_cards.append(
             MetricCard(
                 name=metric_name,
@@ -834,6 +849,13 @@ def build_report_schema(
         metrics=metric_cards,
         trend_chart_image=trend_chart_image,
     )
+
+
+@app.get("/download_report/{report_id}")
+def download_report(report_id: str):
+    """Download generated report"""
+    report_path = get_report_path(report_id)
+    return FileResponse(report_path)
 
 
 @app.post("/generate_report")
@@ -877,3 +899,15 @@ def generate_report(request: ReportRequest):
     # Save and send
     report_id = save_report(report_content, request.format)
     return {"report_id": report_id, "download_url": f"/download_report/{report_id}"}
+
+
+@app.post("/calculate-metrics", response_model=MetricsCalculationResponse)
+def calculate_metrics_endpoint(request: MetricsCalculationRequest):
+    """Calculate average and max values for metrics data"""
+    calculated_metrics = {}
+
+    for metric_name, metric_data in request.metrics_data.items():
+        avg_val, max_val = calculate_metric_stats(metric_data)
+        calculated_metrics[metric_name] = {"avg": avg_val, "max": max_val}
+
+    return MetricsCalculationResponse(calculated_metrics=calculated_metrics)

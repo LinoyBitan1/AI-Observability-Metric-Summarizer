@@ -147,6 +147,61 @@ def get_metrics_data_and_list():
     return metric_data, metrics
 
 
+def get_calculated_metrics_from_mcp(metric_data):
+    """Get calculated metrics from MCP backend"""
+    try:
+        response = requests.post(
+            f"{API_URL}/calculate-metrics", json={"metrics_data": metric_data}
+        )
+        response.raise_for_status()
+        return response.json()["calculated_metrics"]
+    except Exception as e:
+        st.error(f"Error getting calculated metrics from MCP: {e}")
+        return {}
+
+
+def process_chart_data(metric_data, chart_metrics=None):
+    """Process metrics data for chart generation"""
+    if chart_metrics is None:
+        chart_metrics = ["GPU Usage (%)", "P95 Latency (s)"]
+
+    dfs = []
+    for label in chart_metrics:
+        raw_data = metric_data.get(label, [])
+        if raw_data:
+            try:
+                timestamps = [datetime.fromisoformat(p["timestamp"]) for p in raw_data]
+                values = [p["value"] for p in raw_data]
+                df = pd.DataFrame({label: values}, index=timestamps)
+                dfs.append(df)
+            except Exception:
+                pass
+    return dfs
+
+
+def create_trend_chart_image(metric_data, chart_metrics=None):
+    """Create trend chart image for reports"""
+    dfs = process_chart_data(metric_data, chart_metrics)
+    if not dfs:
+        return None
+
+    try:
+        chart_df = pd.concat(dfs, axis=1).fillna(0)
+        fig, ax = plt.subplots(figsize=(8, 4))
+        chart_df.plot(ax=ax)
+        ax.set_title("Trend Over Time")
+        ax.set_xlabel("Timestamp")
+        ax.set_ylabel("Value")
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode("utf-8")
+    except Exception:
+        return None
+
+
 def generate_report_and_download(report_format: str):
     try:
         analysis_params = st.session_state["analysis_params"]
@@ -160,35 +215,7 @@ def generate_report_and_download(report_format: str):
             if metric_name in metric_data:
                 filtered_metrics_data[metric_name] = metric_data[metric_name]
 
-        # --- Save Trend Over Time chart as image ---
-        dfs = []
-        for label in ["GPU Usage (%)", "P95 Latency (s)"]:
-            raw_data = filtered_metrics_data.get(label, [])
-            if raw_data:
-                try:
-                    timestamps = [
-                        datetime.fromisoformat(p["timestamp"]) for p in raw_data
-                    ]
-                    values = [p["value"] for p in raw_data]
-                    df = pd.DataFrame({label: values}, index=timestamps)
-                    dfs.append(df)
-                except Exception:
-                    pass
-        trend_chart_image_b64 = None
-        if dfs:
-            chart_df = pd.concat(dfs, axis=1).fillna(0)
-            fig, ax = plt.subplots(figsize=(8, 4))
-            chart_df.plot(ax=ax)
-            ax.set_title("Trend Over Time")
-            ax.set_xlabel("Timestamp")
-            ax.set_ylabel("Value")
-            plt.tight_layout()
-            buf = io.BytesIO()
-            plt.savefig(buf, format="png")
-            plt.close(fig)
-            buf.seek(0)
-            trend_chart_image_b64 = base64.b64encode(buf.read()).decode("utf-8")
-        # --- End chart image save ---
+        trend_chart_image_b64 = create_trend_chart_image(filtered_metrics_data)
 
         payload = {
             "model_name": analysis_params["model_name"],
@@ -199,7 +226,7 @@ def generate_report_and_download(report_format: str):
             "api_key": analysis_params["api_key"],
             "health_prompt": st.session_state["prompt"],
             "llm_summary": st.session_state["summary"],
-            "metrics_data": filtered_metrics_data,  # Use filtered metrics data
+            "metrics_data": filtered_metrics_data,
         }
         if trend_chart_image_b64:
             payload["trend_chart_image"] = trend_chart_image_b64
@@ -304,28 +331,15 @@ report_format = st.sidebar.selectbox(
 
 spinner_placeholder = st.sidebar.empty()
 
-# --- Download Button Logic ---
-# The button will be displayed only if analysis has been performed.
 if analysis_performed:
-    # Use a variable to track the button click state within the session state
-    # This prevents the button from disappearing.
     if "download_button_clicked" not in st.session_state:
         st.session_state.download_button_clicked = False
-
-    # Check if the button is clicked.
     if st.sidebar.button("📥 Download Report"):
-        # Set the state to True when clicked.
         st.session_state.download_button_clicked = True
-
-    # If the button has been clicked, show the spinner and run the download logic.
-    # The button itself doesn't disappear because its display is not tied to the click.
     if st.session_state.download_button_clicked:
-        # Use the placeholder created earlier for the spinner
         with spinner_placeholder.container():
             with st.spinner("Generating and downloading report..."):
                 generate_report_and_download(report_format)
-
-        # Reset the state so the spinner can show again on subsequent clicks.
         st.session_state.download_button_clicked = False
 
 # --- 📊 Metric Summarizer Page ---
@@ -403,41 +417,31 @@ if page == "📊 Metric Summarizer":
             st.markdown("### 📊 Metric Dashboard")
             # Use the shared function to get metrics data
             metric_data, metrics = get_metrics_data_and_list()
+
+            # Get calculated metrics from MCP
+            calculated_metrics = get_calculated_metrics_from_mcp(metric_data)
+
             cols = st.columns(3)
             for i, label in enumerate(metrics):
-                df = metric_data.get(label)
-                if df:
-                    try:
-                        values = [point["value"] for point in df]
-                        avg_val = sum(values) / len(values)
-                        max_val = max(values)
-                        with cols[i % 3]:
+                with cols[i % 3]:
+                    if label in calculated_metrics:
+                        calc_data = calculated_metrics[label]
+                        if (
+                            calc_data["avg"] is not None
+                            and calc_data["max"] is not None
+                        ):
                             st.metric(
                                 label=label,
-                                value=f"{avg_val:.2f}",
-                                delta=f"↑ Max: {max_val:.2f}",
+                                value=f"{calc_data['avg']:.2f}",
+                                delta=f"↑ Max: {calc_data['max']:.2f}",
                             )
-                    except Exception as e:
-                        with cols[i % 3]:
-                            st.metric(label=label, value="Error", delta=f"{e}")
-                else:
-                    with cols[i % 3]:
+                        else:
+                            st.metric(label=label, value="N/A", delta="No data")
+                    else:
                         st.metric(label=label, value="N/A", delta="No data")
 
             st.markdown("### 📈 Trend Over Time")
-            dfs = []
-            for label in ["GPU Usage (%)", "P95 Latency (s)"]:
-                raw_data = metric_data.get(label, [])
-                if raw_data:
-                    try:
-                        timestamps = [
-                            datetime.fromisoformat(p["timestamp"]) for p in raw_data
-                        ]
-                        values = [p["value"] for p in raw_data]
-                        df = pd.DataFrame({label: values}, index=timestamps)
-                        dfs.append(df)
-                    except Exception as e:
-                        st.warning(f"Chart error for {label}: {e}")
+            dfs = process_chart_data(metric_data)
             if dfs:
                 chart_df = pd.concat(dfs, axis=1).fillna(0)
                 st.line_chart(chart_df)
