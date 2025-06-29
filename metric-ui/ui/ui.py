@@ -338,7 +338,7 @@ if analysis_performed:
         st.session_state.download_button_clicked = True
     if st.session_state.download_button_clicked:
         with spinner_placeholder.container():
-            with st.spinner("Generating and downloading report..."):
+            with st.spinner("Downloading report..."):
                 generate_report_and_download(report_format)
         st.session_state.download_button_clicked = False
 
