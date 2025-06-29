@@ -15,24 +15,15 @@ from fpdf import FPDF
 import uuid
 import pdfkit
 
-
-# --- Report Schema Models ---
-class MetricCard(BaseModel):
-    name: str
-    avg: Optional[float]
-    max: Optional[float]
-    values: List[Dict[str, Any]]
-
-
-class ReportSchema(BaseModel):
-    generated_at: str
-    model_name: str
-    start_date: str
-    end_date: str
-    summarize_model_id: str
-    summary: str
-    metrics: List[MetricCard]
-    trend_chart_image: Optional[str] = None
+# Import report configuration and renderer
+import report_assets.report_config as report_config
+from report_assets.report_renderer import (
+    generate_html_report,
+    generate_markdown_report,
+    generate_pdf_report,
+    ReportSchema,
+    MetricCard,
+)
 
 
 app = FastAPI()
@@ -763,7 +754,88 @@ def chat_metrics(req: ChatMetricsRequest):
         }
 
 
-# Report generation
+# helper functions for report generation
+@app.get("/download_report/{report_id}")
+def download_report(report_id: str):
+    """Download generated report"""
+    report_path = get_report_path(report_id)
+    return FileResponse(report_path)
+
+
+def save_report(report_content, format: str) -> str:
+    report_id = str(uuid.uuid4())
+    reports_dir = "/tmp/reports"
+    os.makedirs(reports_dir, exist_ok=True)
+
+    report_path = os.path.join(reports_dir, f"{report_id}.{format.lower()}")
+
+    # Handle both string and bytes content
+    if isinstance(report_content, bytes):
+        with open(report_path, "wb") as f:
+            f.write(report_content)
+    else:
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report_content)
+
+    return report_id
+
+
+def get_report_path(report_id: str) -> str:
+    """Get file path for report ID"""
+
+    reports_dir = "/tmp/reports"
+
+    # Try to find the file with any extension
+    for file in os.listdir(reports_dir):
+        if file.startswith(report_id):
+            return os.path.join(reports_dir, file)
+
+    raise FileNotFoundError(f"Report {report_id} not found")
+
+
+def build_report_schema(
+    metrics_data: Dict[str, Any],
+    summary: str,
+    model_name: str,
+    start_ts: int,
+    end_ts: int,
+    summarize_model_id: str,
+    trend_chart_image: Optional[str] = None,
+) -> ReportSchema:
+    from datetime import datetime
+
+    # Extract available metrics from the metrics_data dictionary
+    key_metrics = list(metrics_data.keys())
+    metric_cards = []
+    for metric_name in key_metrics:
+        data = metrics_data.get(metric_name, [])
+        if data:
+            values = [point["value"] for point in data]
+            avg_val = sum(values) / len(values) if values else None
+            max_val = max(values) if values else None
+        else:
+            avg_val = None
+            max_val = None
+        metric_cards.append(
+            MetricCard(
+                name=metric_name,
+                avg=avg_val,
+                max=max_val,
+                values=data,
+            )
+        )
+    return ReportSchema(
+        generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        model_name=model_name,
+        start_date=datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M:%S"),
+        end_date=datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M:%S"),
+        summarize_model_id=summarize_model_id,
+        summary=summary,
+        metrics=metric_cards,
+        trend_chart_image=trend_chart_image,
+    )
+
+
 @app.post("/generate_report")
 def generate_report(request: ReportRequest):
     """Generate report in requested format"""
@@ -805,409 +877,3 @@ def generate_report(request: ReportRequest):
     # Save and send
     report_id = save_report(report_content, request.format)
     return {"report_id": report_id, "download_url": f"/download_report/{report_id}"}
-
-
-@app.get("/download_report/{report_id}")
-def download_report(report_id: str):
-    """Download generated report"""
-    report_path = get_report_path(report_id)
-    return FileResponse(report_path)
-
-
-def generate_pdf_report(report_schema: ReportSchema) -> bytes:
-    """Generate PDF report using pdfkit"""
-    # Generate HTML content first using the schema
-    html_content = generate_html_report(report_schema)
-
-    try:
-        # Configure pdfkit options for better emoji support
-        options = {
-            "encoding": "UTF-8",
-            "enable-local-file-access": None,
-            "no-stop-slow-scripts": None,
-            "javascript-delay": "1000",
-            "page-size": "A4",
-            "margin-top": "0.75in",
-            "margin-right": "0.75in",
-            "margin-bottom": "0.75in",
-            "margin-left": "0.75in",
-        }
-
-        # Convert HTML to PDF using pdfkit with options
-        pdf_bytes = pdfkit.from_string(html_content, False, options=options)
-        return pdf_bytes
-    except Exception as e:
-        print(f"Error generating PDF with pdfkit: {e}")
-        # Fallback to HTML content as string
-        return html_content.encode("utf-8")
-
-
-def save_report(report_content, format: str) -> str:
-    report_id = str(uuid.uuid4())
-    reports_dir = "/tmp/reports"
-    os.makedirs(reports_dir, exist_ok=True)
-
-    report_path = os.path.join(reports_dir, f"{report_id}.{format.lower()}")
-
-    # Handle both string and bytes content
-    if isinstance(report_content, bytes):
-        with open(report_path, "wb") as f:
-            f.write(report_content)
-    else:
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(report_content)
-
-    return report_id
-
-
-def get_report_path(report_id: str) -> str:
-    """Get file path for report ID"""
-
-    reports_dir = "/tmp/reports"
-
-    # Try to find the file with any extension
-    for file in os.listdir(reports_dir):
-        if file.startswith(report_id):
-            return os.path.join(reports_dir, file)
-
-    raise FileNotFoundError(f"Report {report_id} not found")
-
-
-def generate_html_report(report_schema: ReportSchema) -> str:
-    """Generate HTML report from unified schema"""
-    # Convert markdown summary to HTML
-    summary_html = markdown.markdown(report_schema.summary, extensions=["extra"])
-
-    html_content = f""" 
-    <!DOCTYPE html> 
-    <html> 
-    <head> 
-        <meta charset="UTF-8"> 
-        <title>AI Metrics Report</title> 
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
-        
-        html, body, [class*="css"] {{
-            font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        }}
-        
-        body {{
-            margin: 40px;
-        }}
-
-        h1, h2, h3, h4 {{
-            font-weight: 600;
-            color: #1c1c1e;
-            letter-spacing: -0.5px;
-        }}
-
-        .stMetric {{
-            border-radius: 12px;
-            background-color: #f1f1f1;
-            padding: 1em;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-            color: #1c1c1e !important;
-        }}
-
-        [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {{
-            color: #1c1c1e !important;
-            font-weight: 600;
-        }}
-
-        .block-container {{
-            padding-top: 2rem;
-        }}
-
-        .stButton>button {{
-            border-radius: 8px;
-            padding: 0.5em 1.2em;
-            font-size: 1em;
-        }}
-
-        footer, header {{
-            visibility: hidden;
-        }}
-
-        /* Additional styles for HTML report */
-        .header {{
-            background-color: #e7f3ff;
-            padding: 20px;
-            border-radius: 5px;
-            margin-bottom: 30px;
-            page-break-inside: avoid;
-        }}
-
-        .section {{
-            margin-bottom: 30px;
-            page-break-inside: avoid;
-            break-inside: avoid;
-        }}
-
-        .summary {{
-            background-color: #f1f1f1;
-            padding: 24px 28px;
-            border-radius: 7px;
-            font-size: 0.9em;
-            line-height: 1.3;
-            margin-bottom: 10px;
-            color: #1c1c1e;
-            page-break-inside: avoid;
-        }}
-
-        .summary p {{
-            margin: 0 0 8px 0;
-        }}
-
-        .summary ul, .summary ol {{
-            margin: 4px 0;
-            padding-left: 20px;
-        }}
-
-        .summary li {{
-            margin: 2px 0;
-        }}
-
-        .dashboard {{
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 15px;
-            margin: 20px 0;
-            page-break-inside: avoid;
-        }}
-
-        .metric-card {{
-            border-radius: 12px;
-            background-color: #f1f1f1;
-            padding: 1em;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-            color: #1c1c1e;
-            page-break-inside: avoid;
-            margin-bottom: 1em;
-        }}
-
-        .metric-value {{
-            font-size: 24px;
-            font-weight: 600;
-            color: #1c1c1e;
-        }}
-
-        .metric-label {{
-            font-size: 14px;
-            color: #6c757d;
-            margin-bottom: 5px;
-        }}
-
-        .metric-delta {{
-            font-size: 12px;
-            color: #28a745;
-        }}
-
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin: 20px 0;
-            page-break-inside: avoid;
-        }}
-
-        th, td {{
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
-        }}
-
-        th {{
-            background-color: #f1f1f1;
-        }}
-
-        .chart-container {{
-            margin: 20px 0;
-            padding: 20px;
-            background-color: #f1f1f1;
-            border-radius: 5px;
-            text-align: center;
-            page-break-inside: avoid;
-        }}
-
-        .chart-container img {{
-            max-width: 100%;
-            height: auto;
-            display: block;
-            margin: 0 auto;
-            page-break-inside: avoid;
-        }}
-
-        p, div, span {{
-            font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        }}
-        </style> 
-    </head> 
-    <body> 
-        <div class="header">
-            <h1>📊 AI Model Metrics Report</h1>
-            <p><strong>Generated:</strong> {report_schema.generated_at}</p>
-        </div>
-
-        <div class="section">
-            <h2>📋 Report Details</h2>
-            <table>
-                <tr><th>Model Selected for Analysis</th><td>{report_schema.model_name}</td></tr>
-                <tr><th>Investment Range (Time Period)</th><td>{report_schema.start_date} to {report_schema.end_date}</td></tr>
-                <tr><th>Summarize Model Chosen</th><td>{report_schema.summarize_model_id}</td></tr>
-            </table>
-        </div>
-
-        <div class="section">
-            <h2>🧠 Model Insights Summary</h2>
-            <div class="summary">
-                {summary_html}
-            </div>
-        </div>
-
-        <div class="section">
-            <h2>📊 Metric Dashboard</h2>
-            <div class="dashboard">
-    """
-
-    # Add metric cards from schema
-    for metric in report_schema.metrics:
-        if metric.avg is not None and metric.max is not None:
-            html_content += f""" 
-                <div class="metric-card">
-                    <div class="metric-label">{metric.name}</div>
-                    <div class="metric-value">{metric.avg:.2f}</div>
-                    <div class="metric-delta">↑ Max: {metric.max:.2f}</div>
-                </div>
-    """
-        else:
-            html_content += f""" 
-                <div class="metric-card">
-                    <div class="metric-label">{metric.name}</div>
-                    <div class="metric-value">N/A</div>
-                    <div class="metric-delta">No data</div>
-                </div>
-    """
-
-    html_content += """
-            </div>
-        </div>
-
-        <div class="section">
-            <h2>📈 Trend Over Time</h2>
-            <div class="chart-container">
-    """
-
-    if report_schema.trend_chart_image:
-        html_content += f'<img src="data:image/png;base64,{report_schema.trend_chart_image}" alt="Trend Over Time Chart"/>'
-
-    html_content += """
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-
-    return html_content
-
-
-def generate_markdown_report(report_schema: ReportSchema) -> str:
-    """Generate Markdown report from unified schema"""
-
-    # Escape pipe characters and other markdown special characters in table content
-    def escape_markdown_table_content(text: str) -> str:
-        return text.replace("|", "\\|").replace("\n", " ")
-
-    escaped_model_name = escape_markdown_table_content(report_schema.model_name)
-    escaped_summarize_model = escape_markdown_table_content(
-        report_schema.summarize_model_id
-    )
-    escaped_date_range = escape_markdown_table_content(
-        f"{report_schema.start_date} to {report_schema.end_date}"
-    )
-
-    markdown_content = f"""# 📊 AI Model Metrics Report
-
-**Generated:** {report_schema.generated_at}
-
-## 📋 Report Details
-
-| Field | Value |
-|-------|-------|
-| **Model Selected for Analysis** | {escaped_model_name} |
-| **Investment Range (Time Period)** | {escaped_date_range} |
-| **Summarize Model Chosen** | {escaped_summarize_model} |
-
-## 🧠 Model Insights Summary
-
-{report_schema.summary.strip()}
-
-## 📊 Metric Dashboard
-
-"""
-
-    markdown_content += "| Metric | Average Value | Max Value |\n"
-    markdown_content += "|--------|---------------|-----------|\n"
-
-    for metric in report_schema.metrics:
-        escaped_metric_name = escape_markdown_table_content(metric.name)
-        if metric.avg is not None and metric.max is not None:
-            markdown_content += (
-                f"| {escaped_metric_name} | {metric.avg:.2f} | {metric.max:.2f} |\n"
-            )
-        else:
-            markdown_content += f"| {escaped_metric_name} | N/A | N/A |\n"
-
-    markdown_content += "\n## 📈 Trend Over Time\n"
-    if report_schema.trend_chart_image:
-        markdown_content += (
-            f"![Trend Chart](data:image/png;base64,{report_schema.trend_chart_image})\n"
-        )
-    return markdown_content
-
-
-def build_report_schema(
-    metrics_data: Dict[str, Any],
-    summary: str,
-    model_name: str,
-    start_ts: int,
-    end_ts: int,
-    summarize_model_id: str,
-    trend_chart_image: Optional[str] = None,
-) -> ReportSchema:
-    from datetime import datetime
-
-    key_metrics = [
-        "Prompt Tokens Created",
-        "P95 Latency (s)",
-        "Requests Running",
-        "GPU Usage (%)",
-        "Output Tokens Created",
-        "Inference Time (s)",
-    ]
-    metric_cards = []
-    for metric_name in key_metrics:
-        data = metrics_data.get(metric_name, [])
-        if data:
-            values = [point["value"] for point in data]
-            avg_val = sum(values) / len(values) if values else None
-            max_val = max(values) if values else None
-        else:
-            avg_val = None
-            max_val = None
-        metric_cards.append(
-            MetricCard(
-                name=metric_name,
-                avg=avg_val,
-                max=max_val,
-                values=data,
-            )
-        )
-    return ReportSchema(
-        generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        model_name=model_name,
-        start_date=datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M:%S"),
-        end_date=datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M:%S"),
-        summarize_model_id=summarize_model_id,
-        summary=summary,
-        metrics=metric_cards,
-        trend_chart_image=trend_chart_image,
-    )

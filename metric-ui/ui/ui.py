@@ -109,6 +109,122 @@ def handle_http_error(response, context):
         st.error(f"❌ {context}: {response.status_code} - {response.text}")
 
 
+def trigger_download(
+    file_content: bytes, filename: str, mime_type: str = "application/octet-stream"
+):
+
+    b64 = base64.b64encode(file_content).decode()
+
+    dl_link = f"""
+    <html>
+    <body>
+    <script>
+    const link = document.createElement('a');
+    link.href = "data:{mime_type};base64,{b64}";
+    link.download = "{filename}";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    </script>
+    </body>
+    </html>
+    """
+
+    components.html(dl_link, height=0, width=0)
+
+
+def get_metrics_data_and_list():
+    """Get metrics data and list to avoid code duplication"""
+    metric_data = st.session_state.get("metric_data", {})
+    metrics = [
+        "Prompt Tokens Created",
+        "P95 Latency (s)",
+        "Requests Running",
+        "GPU Usage (%)",
+        "Output Tokens Created",
+        "Inference Time (s)",
+    ]
+    return metric_data, metrics
+
+
+def generate_report_and_download(report_format: str):
+    try:
+        analysis_params = st.session_state["analysis_params"]
+
+        # Use the shared function to get metrics data
+        metric_data, metrics = get_metrics_data_and_list()
+
+        # Filter metrics_data to only include the metrics shown in dashboard
+        filtered_metrics_data = {}
+        for metric_name in metrics:
+            if metric_name in metric_data:
+                filtered_metrics_data[metric_name] = metric_data[metric_name]
+
+        # --- Save Trend Over Time chart as image ---
+        dfs = []
+        for label in ["GPU Usage (%)", "P95 Latency (s)"]:
+            raw_data = filtered_metrics_data.get(label, [])
+            if raw_data:
+                try:
+                    timestamps = [
+                        datetime.fromisoformat(p["timestamp"]) for p in raw_data
+                    ]
+                    values = [p["value"] for p in raw_data]
+                    df = pd.DataFrame({label: values}, index=timestamps)
+                    dfs.append(df)
+                except Exception:
+                    pass
+        trend_chart_image_b64 = None
+        if dfs:
+            chart_df = pd.concat(dfs, axis=1).fillna(0)
+            fig, ax = plt.subplots(figsize=(8, 4))
+            chart_df.plot(ax=ax)
+            ax.set_title("Trend Over Time")
+            ax.set_xlabel("Timestamp")
+            ax.set_ylabel("Value")
+            plt.tight_layout()
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png")
+            plt.close(fig)
+            buf.seek(0)
+            trend_chart_image_b64 = base64.b64encode(buf.read()).decode("utf-8")
+        # --- End chart image save ---
+
+        payload = {
+            "model_name": analysis_params["model_name"],
+            "start_ts": analysis_params["start_ts"],
+            "end_ts": analysis_params["end_ts"],
+            "summarize_model_id": analysis_params["summarize_model_id"],
+            "format": report_format,
+            "api_key": analysis_params["api_key"],
+            "health_prompt": st.session_state["prompt"],
+            "llm_summary": st.session_state["summary"],
+            "metrics_data": filtered_metrics_data,  # Use filtered metrics data
+        }
+        if trend_chart_image_b64:
+            payload["trend_chart_image"] = trend_chart_image_b64
+        response = requests.post(
+            f"{API_URL}/generate_report",
+            json=payload,
+        )
+        response.raise_for_status()
+        report_id = response.json()["report_id"]
+        download_response = requests.get(f"{API_URL}/download_report/{report_id}")
+        download_response.raise_for_status()
+        mime_map = {
+            "HTML": "text/html",
+            "PDF": "application/pdf",
+            "Markdown": "text/markdown",
+        }
+        mime_type = mime_map.get(report_format, "application/octet-stream")
+        filename = f"ai_metrics_report.{report_format.lower()}"
+        trigger_download(download_response.content, filename, mime_type)
+    except requests.exceptions.HTTPError as http_err:
+        st.error(f"HTTP error during report generation: {http_err}")
+    except Exception as e:
+        st.error(f"❌ Error during report generation: {e}")
+
+
 model_list = get_models()
 namespaces = get_namespaces()
 
@@ -186,106 +302,31 @@ report_format = st.sidebar.selectbox(
     "Select Report Format", ["HTML", "PDF", "Markdown"], disabled=not analysis_performed
 )
 
+spinner_placeholder = st.sidebar.empty()
 
-def trigger_download(
-    file_content: bytes, filename: str, mime_type: str = "application/octet-stream"
-):
-
-    b64 = base64.b64encode(file_content).decode()
-
-    dl_link = f"""
-    <html>
-    <body>
-    <script>
-    const link = document.createElement('a');
-    link.href = "data:{mime_type};base64,{b64}";
-    link.download = "{filename}";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    </script>
-    </body>
-    </html>
-    """
-
-    components.html(dl_link, height=0, width=0)
-
-
-def generate_report_and_download(report_format: str):
-    try:
-        analysis_params = st.session_state["analysis_params"]
-        # --- Save Trend Over Time chart as image ---
-        metric_data = st.session_state.get("metric_data", {})
-        dfs = []
-        for label in ["GPU Usage (%)", "P95 Latency (s)"]:
-            raw_data = metric_data.get(label, [])
-            if raw_data:
-                try:
-                    timestamps = [
-                        datetime.fromisoformat(p["timestamp"]) for p in raw_data
-                    ]
-                    values = [p["value"] for p in raw_data]
-                    df = pd.DataFrame({label: values}, index=timestamps)
-                    dfs.append(df)
-                except Exception:
-                    pass
-        trend_chart_image_b64 = None
-        if dfs:
-            chart_df = pd.concat(dfs, axis=1).fillna(0)
-            fig, ax = plt.subplots(figsize=(8, 4))
-            chart_df.plot(ax=ax)
-            ax.set_title("Trend Over Time")
-            ax.set_xlabel("Timestamp")
-            ax.set_ylabel("Value")
-            plt.tight_layout()
-            buf = io.BytesIO()
-            plt.savefig(buf, format="png")
-            plt.close(fig)
-            buf.seek(0)
-            trend_chart_image_b64 = base64.b64encode(buf.read()).decode("utf-8")
-        # --- End chart image save ---
-        payload = {
-            "model_name": analysis_params["model_name"],
-            "start_ts": analysis_params["start_ts"],
-            "end_ts": analysis_params["end_ts"],
-            "summarize_model_id": analysis_params["summarize_model_id"],
-            "format": report_format,
-            "api_key": analysis_params["api_key"],
-            "health_prompt": st.session_state["prompt"],
-            "llm_summary": st.session_state["summary"],
-            "metrics_data": st.session_state["metric_data"],
-        }
-        if trend_chart_image_b64:
-            payload["trend_chart_image"] = trend_chart_image_b64
-        response = requests.post(
-            f"{API_URL}/generate_report",
-            json=payload,
-        )
-        response.raise_for_status()
-        report_id = response.json()["report_id"]
-        download_response = requests.get(f"{API_URL}/download_report/{report_id}")
-        download_response.raise_for_status()
-        mime_map = {
-            "HTML": "text/html",
-            "PDF": "application/pdf",
-            "Markdown": "text/markdown",
-        }
-        mime_type = mime_map.get(report_format, "application/octet-stream")
-        filename = f"ai_metrics_report.{report_format.lower()}"
-        trigger_download(download_response.content, filename, mime_type)
-    except requests.exceptions.HTTPError as http_err:
-        st.error(f"HTTP error during report generation: {http_err}")
-    except Exception as e:
-        st.error(f"❌ Error during report generation: {e}")
-
-
+# --- Download Button Logic ---
+# The button will be displayed only if analysis has been performed.
 if analysis_performed:
+    # Use a variable to track the button click state within the session state
+    # This prevents the button from disappearing.
+    if "download_button_clicked" not in st.session_state:
+        st.session_state.download_button_clicked = False
+
+    # Check if the button is clicked.
     if st.sidebar.button("📥 Download Report"):
-        spinner_placeholder = st.sidebar.empty()
+        # Set the state to True when clicked.
+        st.session_state.download_button_clicked = True
+
+    # If the button has been clicked, show the spinner and run the download logic.
+    # The button itself doesn't disappear because its display is not tied to the click.
+    if st.session_state.download_button_clicked:
+        # Use the placeholder created earlier for the spinner
         with spinner_placeholder.container():
             with st.spinner("Generating and downloading report..."):
                 generate_report_and_download(report_format)
 
+        # Reset the state so the spinner can show again on subsequent clicks.
+        st.session_state.download_button_clicked = False
 
 # --- 📊 Metric Summarizer Page ---
 if page == "📊 Metric Summarizer":
@@ -360,15 +401,8 @@ if page == "📊 Metric Summarizer":
 
         with col2:
             st.markdown("### 📊 Metric Dashboard")
-            metric_data = st.session_state.get("metric_data", {})
-            metrics = [
-                "Prompt Tokens Created",
-                "P95 Latency (s)",
-                "Requests Running",
-                "GPU Usage (%)",
-                "Output Tokens Created",
-                "Inference Time (s)",
-            ]
+            # Use the shared function to get metrics data
+            metric_data, metrics = get_metrics_data_and_list()
             cols = st.columns(3)
             for i, label in enumerate(metrics):
                 df = metric_data.get(label)
