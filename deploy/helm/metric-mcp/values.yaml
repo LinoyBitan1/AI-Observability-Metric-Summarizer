@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: quay.io/rh-ee-lbitan/metric-mcp
-  tag: metric-mcp-3.0.1
+  tag: alerts
 
 service:
   type: ClusterIP

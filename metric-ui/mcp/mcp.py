@@ -9,6 +9,7 @@ from scipy.stats import linregress
 import os
 import json
 import re
+import time
 from typing import List, Dict, Any, Optional
 import uuid
 
@@ -24,7 +25,8 @@ from report_assets.report_renderer import (
 app = FastAPI()
 
 # --- CONFIG ---
-PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "https://localhost:9090")
+ALERTMANAGER_URL = os.getenv("ALERTMANAGER_URL", "https://localhost:9093")
 LLAMA_STACK_URL = os.getenv("LLAMA_STACK_URL", "http://localhost:8321/v1/openai/v1")
 LLM_API_TOKEN = os.getenv("LLM_API_TOKEN", "")
 
@@ -49,7 +51,7 @@ else:
 
 # CA bundle location (mounted via ConfigMap)
 CA_BUNDLE_PATH = "/etc/pki/ca-trust/extracted/pem/ca-bundle.crt"
-verify = CA_BUNDLE_PATH if os.path.exists(CA_BUNDLE_PATH) else True
+verify = CA_BUNDLE_PATH if os.path.exists(CA_BUNDLE_PATH) else False
 
 # --- Metric Queries ---
 ALL_METRICS = {
@@ -151,6 +153,25 @@ class ChatMetricsRequest(BaseModel):
     api_key: Optional[str] = None
 
 
+class ChatAlertsRequest(BaseModel):
+    question: str
+    start_ts: int
+    end_ts: int
+    namespace: Optional[str] = None
+    summarize_model_id: str
+    api_key: Optional[str] = None
+
+
+class ChatUnifiedRequest(BaseModel):
+    question: str
+    start_ts: int
+    end_ts: int
+    namespace: str
+    model_name: Optional[str] = None
+    summarize_model_id: str
+    api_key: Optional[str] = None
+
+
 class ReportRequest(BaseModel):
     model_name: str
     start_ts: int
@@ -170,6 +191,357 @@ class MetricsCalculationRequest(BaseModel):
 
 class MetricsCalculationResponse(BaseModel):
     calculated_metrics: Dict[str, Dict[str, Optional[float]]]
+
+
+# --- Alert Helpers ---
+def fetch_alerts(start_ts, end_ts, namespace=None, alertname=None):
+    """Fetch alerts from Prometheus TSDB using ALERTS metric"""
+    try:
+        # Convert timestamps to datetime for query
+        start_dt = datetime.fromtimestamp(start_ts)
+        end_dt = datetime.fromtimestamp(end_ts)
+
+        print(f"🔍 Fetching alerts from {start_dt} to {end_dt}")
+        print(f"🔍 Namespace: {namespace}, Alertname: {alertname}")
+
+        # Try multiple alert query approaches
+        alert_results = []
+
+        # Approach 1: Query ALERTS metric (standard Prometheus)
+        try:
+            query = "ALERTS"
+            if namespace:
+                query += f'{{namespace="{namespace}"}}'
+            if alertname:
+                query += f'{{alertname="{alertname}"}}'
+
+            print(f"🔍 PromQL Query: {query}")
+
+            params = {
+                "query": query,
+                "start": start_dt.isoformat() + "Z",
+                "end": end_dt.isoformat() + "Z",
+                "step": "1m",  # 1-minute resolution
+            }
+
+            headers = (
+                {"Authorization": f"Bearer {THANOS_TOKEN}"} if THANOS_TOKEN else {}
+            )
+
+            response = requests.get(
+                f"{PROMETHEUS_URL}/api/v1/query_range",
+                params=params,
+                headers=headers,
+                verify=verify,
+                timeotut=30,
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            if data["status"] == "success":
+                alert_results.extend(data["data"]["result"])
+                print(
+                    f"✅ Found {len(data['data']['result'])} alert series from ALERTS metric"
+                )
+            else:
+                print(
+                    f"❌ ALERTS metric query failed: {data.get('error', 'Unknown error')}"
+                )
+        except Exception as e:
+            print(f"❌ Error querying ALERTS metric: {e}")
+
+        # Approach 2: Query specific alert metrics (for vLLM alerts)
+        try:
+            vllm_alert_queries = [
+                "vllm:gpu_cache_usage_perc",
+                "vllm:e2e_request_latency_seconds_count",
+                "vllm:request_inference_time_seconds_count",
+                "vllm:num_aborted_requests",
+                "vllm:num_requests_running",
+                "vllm:request_prompt_tokens_created",
+            ]
+
+            for alert_query in vllm_alert_queries:
+                query = f"{alert_query}"
+                if namespace:
+                    query += f'{{namespace="{namespace}"}}'
+
+                print(f"🔍 Trying alert query: {query}")
+
+                params = {
+                    "query": query,
+                    "start": start_dt.isoformat() + "Z",
+                    "end": end_dt.isoformat() + "Z",
+                    "step": "1m",
+                }
+
+                response = requests.get(
+                    f"{PROMETHEUS_URL}/api/v1/query_range",
+                    params=params,
+                    headers=headers,
+                    verify=verify,
+                    timeout=30,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if data["status"] == "success" and data["data"]["result"]:
+                        alert_results.extend(data["data"]["result"])
+                        print(
+                            f"✅ Found {len(data['data']['result'])} series from {alert_query}"
+                        )
+                else:
+                    print(f"❌ Query {alert_query} failed: {response.status_code}")
+
+        except Exception as e:
+            print(f"❌ Error querying specific alert metrics: {e}")
+
+        # Approach 3: Query alert state changes
+        try:
+            query = "changes(ALERTS[1m])"
+            if namespace:
+                query += f'{{namespace="{namespace}"}}'
+
+            print(f"🔍 Trying alert state changes query: {query}")
+
+            params = {
+                "query": query,
+                "start": start_dt.isoformat() + "Z",
+                "end": end_dt.isoformat() + "Z",
+                "step": "1m",
+            }
+
+            response = requests.get(
+                f"{PROMETHEUS_URL}/api/v1/query_range",
+                params=params,
+                headers=headers,
+                verify=verify,
+                timeout=30,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                if data["status"] == "success" and data["data"]["result"]:
+                    alert_results.extend(data["data"]["result"])
+                    print(f"✅ Found {len(data['data']['result'])} alert state changes")
+
+        except Exception as e:
+            print(f"❌ Error querying alert state changes: {e}")
+
+        print(f"🔍 Total alert results found: {len(alert_results)}")
+        return alert_results
+
+    except Exception as e:
+        print(f"❌ Error in fetch_alerts: {e}")
+        return []
+
+
+def fetch_alertmanager_alerts(
+    namespace=None, active_only=True, start_ts=None, end_ts=None
+):
+    """Fetch alerts from Alertmanager API (current and historical)"""
+    try:
+        headers = {"Authorization": f"Bearer {THANOS_TOKEN}"} if THANOS_TOKEN else {}
+        all_alerts = []
+
+        # Get current alerts
+        try:
+            print(f"🔍 Fetching current alerts from Alertmanager...")
+            response = requests.get(
+                f"{ALERTMANAGER_URL}/api/v2/alerts",
+                headers=headers,
+                verify=verify,
+                timeout=30,
+            )
+            response.raise_for_status()
+            current_alerts = response.json()
+            print(f"✅ Found {len(current_alerts)} current alerts in Alertmanager")
+            all_alerts.extend(current_alerts)
+        except Exception as e:
+            print(f"❌ Error fetching current alerts: {e}")
+
+        # Try to get historical alerts if time range is provided
+        if start_ts and end_ts:
+            try:
+                print(f"🔍 Attempting to fetch historical alerts...")
+                # Try different Alertmanager endpoints for historical data
+                historical_endpoints = [
+                    f"{ALERTMANAGER_URL}/api/v1/alerts",
+                    f"{ALERTMANAGER_URL}/api/v2/alerts",
+                ]
+
+                for endpoint in historical_endpoints:
+                    try:
+                        params = {}
+                        if start_ts:
+                            params["start"] = (
+                                datetime.fromtimestamp(start_ts).isoformat() + "Z"
+                            )
+                        if end_ts:
+                            params["end"] = (
+                                datetime.fromtimestamp(end_ts).isoformat() + "Z"
+                            )
+
+                        response = requests.get(
+                            endpoint,
+                            params=params,
+                            headers=headers,
+                            verify=verify,
+                            timeout=30,
+                        )
+
+                        if response.status_code == 200:
+                            historical_alerts = response.json()
+                            if isinstance(historical_alerts, list):
+                                all_alerts.extend(historical_alerts)
+                                print(
+                                    f"✅ Found {len(historical_alerts)} historical alerts from {endpoint}"
+                                )
+                                break
+                    except Exception as e:
+                        print(f"❌ Error with endpoint {endpoint}: {e}")
+                        continue
+
+            except Exception as e:
+                print(f"❌ Error fetching historical alerts: {e}")
+
+        # Filter by namespace if specified
+        if namespace:
+            original_count = len(all_alerts)
+            all_alerts = [
+                alert
+                for alert in all_alerts
+                if alert.get("labels", {}).get("namespace") == namespace
+            ]
+            print(
+                f"🔍 Filtered by namespace '{namespace}': {original_count} -> {len(all_alerts)} alerts"
+            )
+
+        # Filter by active status if requested
+        if active_only:
+            original_count = len(all_alerts)
+            all_alerts = [
+                alert
+                for alert in all_alerts
+                if alert.get("status", {}).get("state") == "active"
+            ]
+            print(
+                f"🔍 Filtered by active status: {original_count} -> {len(all_alerts)} alerts"
+            )
+
+        # Remove duplicates based on alert fingerprint
+        unique_alerts = []
+        seen_fingerprints = set()
+        for alert in all_alerts:
+            fingerprint = alert.get("fingerprint", "")
+            if fingerprint and fingerprint not in seen_fingerprints:
+                unique_alerts.append(alert)
+                seen_fingerprints.add(fingerprint)
+            elif not fingerprint:
+                # If no fingerprint, use a combination of labels
+                alert_key = f"{alert.get('labels', {}).get('alertname', '')}-{alert.get('labels', {}).get('namespace', '')}-{alert.get('startsAt', '')}"
+                if alert_key not in seen_fingerprints:
+                    unique_alerts.append(alert)
+                    seen_fingerprints.add(alert_key)
+
+        print(f"🔍 Final unique alerts: {len(unique_alerts)}")
+        return unique_alerts
+
+    except Exception as e:
+        print(f"❌ Error in fetch_alertmanager_alerts: {e}")
+        return []
+
+
+def build_alert_summary(alerts_data, alertmanager_alerts=None):
+    """Build a summary of alerts for LLM consumption"""
+    if not alerts_data and not alertmanager_alerts:
+        return "No alerts found in the specified time range."
+
+    summary_parts = []
+    total_alerts = 0
+
+    # Process historical alerts from Prometheus
+    if alerts_data:
+        alert_counts = {}
+        alert_details = {}
+
+        for result in alerts_data:
+            metric_labels = result.get("metric", {})
+            alertname = metric_labels.get("alertname", "Unknown")
+            severity = metric_labels.get("severity", "unknown")
+            namespace = metric_labels.get("namespace", "unknown")
+
+            firing_instances = 0
+            for point in result.get("values", []):
+                timestamp, value = point
+                if float(value) > 0:  # Alert was firing
+                    firing_instances += 1
+                    total_alerts += 1
+
+            if firing_instances > 0:
+                if alertname not in alert_counts:
+                    alert_counts[alertname] = {
+                        "severity": severity,
+                        "count": 0,
+                        "namespace": namespace,
+                        "instances": [],
+                    }
+
+                alert_counts[alertname]["count"] += firing_instances
+                alert_counts[alertname]["instances"].append(
+                    {
+                        "namespace": namespace,
+                        "severity": severity,
+                        "firing_count": firing_instances,
+                    }
+                )
+
+        if alert_counts:
+            summary_parts.append("Historical Alerts (from Prometheus TSDB):")
+            for alertname, info in alert_counts.items():
+                summary_parts.append(
+                    f"- {alertname} ({info['severity']}): {info['count']} firing instances in namespace {info['namespace']}"
+                )
+
+    # Process alerts from Alertmanager
+    if alertmanager_alerts:
+        active_alerts = []
+        historical_alerts = []
+
+        for alert in alertmanager_alerts:
+            alertname = alert.get("labels", {}).get("alertname", "Unknown")
+            severity = alert.get("labels", {}).get("severity", "unknown")
+            namespace = alert.get("labels", {}).get("namespace", "unknown")
+            starts_at = alert.get("startsAt", "Unknown")
+            ends_at = alert.get("endsAt", "Unknown")
+            state = alert.get("status", {}).get("state", "unknown")
+
+            alert_info = f"- {alertname} ({severity}): Namespace {namespace}, Started: {starts_at}"
+            if ends_at and ends_at != "0001-01-01T00:00:00Z":
+                alert_info += f", Ended: {ends_at}"
+            alert_info += f", State: {state}"
+
+            if state == "active":
+                active_alerts.append(alert_info)
+            else:
+                historical_alerts.append(alert_info)
+
+            total_alerts += 1
+
+        if active_alerts:
+            summary_parts.append("\nCurrently Active Alerts:")
+            summary_parts.extend(active_alerts)
+
+        if historical_alerts:
+            summary_parts.append("\nHistorical Alerts (from Alertmanager):")
+            summary_parts.extend(historical_alerts)
+
+    # Add summary statistics
+    if total_alerts > 0:
+        summary_parts.insert(0, f"Total alerts found: {total_alerts}")
+        summary_parts.insert(1, "=" * 50)
+
+    return "\n".join(summary_parts) if summary_parts else "No alerts found."
 
 
 # --- Helpers ---
@@ -335,7 +707,7 @@ def _make_api_request(
     url: str, headers: dict, payload: dict, verify_ssl: bool = True
 ) -> dict:
     """Make API request with consistent error handling"""
-    response = requests.post(url, headers=headers, json=payload, verify=verify_ssl)
+    response = requests.post(url, headers=headers, json=payload, verify=verify)
     response.raise_for_status()
     return response.json()
 
@@ -347,10 +719,17 @@ def _validate_and_extract_response(
     if "choices" not in response_json or not response_json["choices"]:
         raise ValueError(f"Invalid {provider} response format")
 
-    if is_external:
-        return response_json["choices"][0]["message"]["content"].strip()
+    choice = response_json["choices"][0]
+
+    # Handle both chat completions (message.content) and legacy completions (text)
+    if "message" in choice and "content" in choice["message"]:
+        return choice["message"]["content"].strip()
+    elif "text" in choice:
+        return choice["text"].strip()
     else:
-        return response_json["choices"][0]["text"].strip()
+        raise ValueError(
+            f"Invalid response format: no 'message.content' or 'text' found in choice"
+        )
 
 
 # New helper function to aggressively clean LLM summary strings
@@ -405,13 +784,16 @@ def summarize_with_llm(
 
         payload = {
             "model": summarize_model_id,
-            "prompt": prompt,
+            "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.5,
             "max_tokens": 1000,
         }
 
         response_json = _make_api_request(
-            f"{LLAMA_STACK_URL}/completions", headers, payload, verify_ssl=verify
+            f"{LLAMA_STACK_URL}/chat/completions",
+            headers,
+            payload,
+            verify_ssl=bool(verify),
         )
 
         return _validate_and_extract_response(
@@ -422,6 +804,100 @@ def summarize_with_llm(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/debug/alerts")
+def debug_alerts():
+    """Debug endpoint to test alert queries directly"""
+    try:
+        # Test current time range (last 24 hours)
+        end_ts = int(time.time())
+        start_ts = end_ts - (24 * 60 * 60)
+
+        print(
+            f"🔍 Debug alerts request - Time range: {datetime.fromtimestamp(start_ts)} to {datetime.fromtimestamp(end_ts)}"
+        )
+
+        # Test Prometheus queries
+        prometheus_results = {}
+        test_queries = [
+            "ALERTS",
+            'ALERTS{namespace="default"}',
+            "vllm_high_gpu_usage",
+            "vllm_high_latency",
+        ]
+
+        for query in test_queries:
+            try:
+                response = requests.get(
+                    f"{PROMETHEUS_URL}/api/v1/query",
+                    params={"query": query},
+                    headers=(
+                        {"Authorization": f"Bearer {THANOS_TOKEN}"}
+                        if THANOS_TOKEN
+                        else {}
+                    ),
+                    verify=verify,
+                    timeout=10,
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("status") == "success":
+                        prometheus_results[query] = {
+                            "status": "success",
+                            "result_count": len(data.get("data", {}).get("result", [])),
+                        }
+                    else:
+                        prometheus_results[query] = {
+                            "status": "error",
+                            "error": data.get("error", "Unknown error"),
+                        }
+                else:
+                    prometheus_results[query] = {
+                        "status": "http_error",
+                        "status_code": response.status_code,
+                    }
+            except Exception as e:
+                prometheus_results[query] = {"status": "exception", "error": str(e)}
+
+        # Test Alertmanager
+        alertmanager_status = "unknown"
+        alertmanager_count = 0
+        try:
+            response = requests.get(
+                f"{ALERTMANAGER_URL}/api/v2/alerts",
+                headers=(
+                    {"Authorization": f"Bearer {THANOS_TOKEN}"} if THANOS_TOKEN else {}
+                ),
+                verify=verify,
+                timeout=10,
+            )
+            if response.status_code == 200:
+                alerts = response.json()
+                alertmanager_status = "success"
+                alertmanager_count = len(alerts)
+            else:
+                alertmanager_status = f"http_error_{response.status_code}"
+        except Exception as e:
+            alertmanager_status = f"exception_{str(e)}"
+
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "prometheus_url": PROMETHEUS_URL,
+            "alertmanager_url": ALERTMANAGER_URL,
+            "prometheus_queries": prometheus_results,
+            "alertmanager": {
+                "status": alertmanager_status,
+                "alert_count": alertmanager_count,
+            },
+            "time_range": {
+                "start": datetime.fromtimestamp(start_ts).isoformat(),
+                "end": datetime.fromtimestamp(end_ts).isoformat(),
+            },
+        }
+
+    except Exception as e:
+        return {"error": str(e), "timestamp": datetime.now().isoformat()}
 
 
 # Helper to get models (extracted from list_models endpoint)
@@ -753,6 +1229,250 @@ def chat_metrics(req: ChatMetricsRequest):
         return {
             "promql": "",
             "summary": f"An unexpected error occurred: {e}. Raw LLM output: {llm_response}",
+        }
+
+
+@app.post("/chat-alerts")
+def chat_alerts(req: ChatAlertsRequest):
+    """Chat endpoint specifically for alert-related questions"""
+    try:
+        print(f"🚨 Chat Alerts Request:")
+        print(f"   Question: {req.question}")
+        print(
+            f"   Time Range: {datetime.fromtimestamp(req.start_ts)} to {datetime.fromtimestamp(req.end_ts)}"
+        )
+        print(f"   Namespace: {req.namespace}")
+
+        # Fetch alerts from both Prometheus TSDB and Alertmanager
+        alerts_data = fetch_alerts(req.start_ts, req.end_ts, req.namespace)
+        alertmanager_alerts = fetch_alertmanager_alerts(
+            req.namespace,
+            active_only=False,  # Get both active and inactive alerts
+            start_ts=req.start_ts,
+            end_ts=req.end_ts,
+        )
+
+        print(f"🔍 Prometheus alerts data: {len(alerts_data)} series")
+        print(f"🔍 Alertmanager alerts: {len(alertmanager_alerts)} alerts")
+
+        # Build alert summary
+        alert_summary = build_alert_summary(alerts_data, alertmanager_alerts)
+
+        # Build prompt for alert-specific questions
+        prompt = f"""
+You are an AI assistant specialized in analyzing Kubernetes and vLLM alerts. You have access to alert data from both Prometheus TSDB (historical) and Alertmanager (current).
+
+Alert Data Summary:
+{alert_summary}
+
+User Question: {req.question}
+
+Please provide a comprehensive answer that:
+1. Directly addresses the user's question about alerts
+2. Explains what the alerts mean in simple terms
+3. Suggests potential causes and troubleshooting steps
+4. If relevant, mentions any patterns or trends in the alert data
+
+Respond in a clear, helpful manner without using technical jargon unless necessary.
+"""
+
+        llm_response = summarize_with_llm(prompt, req.summarize_model_id, req.api_key)
+
+        return {
+            "summary": llm_response,
+            "alert_summary": alert_summary,
+            "active_alerts_count": len(alertmanager_alerts),
+            "historical_alerts_count": len(alerts_data),
+        }
+
+    except Exception as e:
+        print(f"Error in chat_alerts: {e}")
+        return {
+            "summary": f"Error processing alert query: {e}",
+            "alert_summary": "Error fetching alerts",
+            "active_alerts_count": 0,
+            "historical_alerts_count": 0,
+        }
+
+
+@app.post("/chat-unified")
+def chat_unified(req: ChatUnifiedRequest):
+    """Unified chat endpoint that handles both metrics and alerts"""
+    try:
+        # Determine if the question is about alerts, metrics, or both
+        question_lower = req.question.lower()
+        is_alert_question = any(
+            keyword in question_lower
+            for keyword in [
+                "alert",
+                "alerts",
+                "firing",
+                "threshold",
+                "exceeded",
+                "error",
+                "warning",
+                "critical",
+            ]
+        )
+        is_metric_question = any(
+            keyword in question_lower
+            for keyword in [
+                "latency",
+                "gpu",
+                "usage",
+                "tokens",
+                "requests",
+                "performance",
+                "throughput",
+            ]
+        )
+
+        response_data = {
+            "summary": "",
+            "metrics_data": None,
+            "alert_summary": None,
+            "promql": "",
+        }
+
+        # Handle metrics if model_name is provided or question is metric-related
+        if req.model_name and (is_metric_question or not is_alert_question):
+            try:
+                # Fetch metrics data
+                metric_dfs = {
+                    label: fetch_metrics(
+                        query,
+                        req.model_name,
+                        req.start_ts,
+                        req.end_ts,
+                        namespace=req.namespace,
+                    )
+                    for label, query in ALL_METRICS.items()
+                }
+
+                metrics_summary = build_prompt(metric_dfs, req.model_name)
+                response_data["metrics_data"] = metrics_summary
+
+                # Generate PromQL if it's a metric question
+                if is_metric_question:
+                    prompt = build_flexible_llm_prompt(
+                        req.question,
+                        req.model_name,
+                        metrics_summary,
+                        selected_namespace=req.namespace,
+                    )
+                    llm_response = summarize_with_llm(
+                        prompt, req.summarize_model_id, req.api_key
+                    )
+
+                    # Parse response for PromQL (reuse existing logic)
+                    try:
+                        cleaned_response = llm_response.strip()
+                        cleaned_response = re.sub(
+                            r"```json\s*|\s*```", "", cleaned_response
+                        )
+                        cleaned_response = cleaned_response.strip()
+
+                        json_match = re.search(r"\{.*?\}", cleaned_response, re.DOTALL)
+                        if json_match:
+                            json_string = json_match.group(0)
+                            json_string = re.sub(r"\s+", " ", json_string)
+                            json_string = re.sub(
+                                r"([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:",
+                                r'\1"\2":',
+                                json_string,
+                            )
+                            json_string = re.sub(
+                                r'"([^"]+)"\s*"\s*:', r'"\1":', json_string
+                            )
+                            json_string = re.sub(r",\s*}", "}", json_string)
+
+                            parsed = json.loads(json_string)
+                            promql = parsed.get("promql", "").strip()
+                            summary = _clean_llm_summary_string(
+                                parsed.get("summary", "")
+                            )
+
+                            if promql:
+                                promql = re.sub(
+                                    r"\{([^}]*)namespace=[^,}]*(,)?", r"{\1", promql
+                                )
+                                if "{" in promql:
+                                    promql = promql.replace(
+                                        "{", f"{{namespace='{req.namespace}', "
+                                    )
+                                else:
+                                    promql = f"{promql}{{namespace='{req.namespace}'}}"
+
+                            response_data["promql"] = promql
+                            response_data["summary"] = summary
+                        else:
+                            response_data["summary"] = llm_response
+                    except Exception as e:
+                        response_data["summary"] = llm_response
+
+            except Exception as e:
+                print(f"Error processing metrics: {e}")
+                response_data["summary"] = f"Error processing metrics: {e}"
+
+        # Handle alerts if question is alert-related
+        if is_alert_question:
+            try:
+                alerts_data = fetch_alerts(req.start_ts, req.end_ts, req.namespace)
+                alertmanager_alerts = fetch_alertmanager_alerts(req.namespace)
+                alert_summary = build_alert_summary(alerts_data, alertmanager_alerts)
+                response_data["alert_summary"] = alert_summary
+
+                # If no metrics summary yet, create alert-focused response
+                if not response_data["summary"]:
+                    prompt = f"""
+You are an AI assistant analyzing alerts in the {req.namespace} namespace.
+
+Alert Data:
+{alert_summary}
+
+User Question: {req.question}
+
+Please provide a comprehensive answer about the alerts, their meaning, and potential causes.
+"""
+                    llm_response = summarize_with_llm(
+                        prompt, req.summarize_model_id, req.api_key
+                    )
+                    response_data["summary"] = llm_response
+
+            except Exception as e:
+                print(f"Error processing alerts: {e}")
+                if not response_data["summary"]:
+                    response_data["summary"] = f"Error processing alerts: {e}"
+
+        # If we have both metrics and alerts, create a unified response
+        if response_data["metrics_data"] and response_data["alert_summary"]:
+            unified_prompt = f"""
+You are an AI assistant analyzing both metrics and alerts for the {req.namespace} namespace.
+
+Metrics Summary:
+{response_data['metrics_data']}
+
+Alert Summary:
+{response_data['alert_summary']}
+
+User Question: {req.question}
+
+Please provide a comprehensive answer that addresses both the metrics performance and any alert conditions, explaining how they might be related.
+"""
+            llm_response = summarize_with_llm(
+                unified_prompt, req.summarize_model_id, req.api_key
+            )
+            response_data["summary"] = llm_response
+
+        return response_data
+
+    except Exception as e:
+        print(f"Error in chat_unified: {e}")
+        return {
+            "summary": f"Error processing unified query: {e}",
+            "metrics_data": None,
+            "alert_summary": None,
+            "promql": "",
         }
 
 

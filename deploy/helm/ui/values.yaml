@@ -1,6 +1,6 @@
 image:
   repository: quay.io/rh-ee-lbitan/metric-ui
-  tag: metric-ui-3.0.1
+  tag: alerts
   pullPolicy: IfNotPresent
 
 service:

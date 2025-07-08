@@ -33,7 +33,15 @@ st.markdown(
 
 # --- Page Selector ---
 st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to:", ["📊 Metric Summarizer", "🤖 Chat with Prometheus"])
+page = st.sidebar.radio(
+    "Go to:",
+    [
+        "📊 Metric Summarizer",
+        "🤖 Chat with Prometheus",
+        "🚨 Chat with Alerts",
+        "🔍 Unified Chat",
+    ],
+)
 
 
 # --- Shared Utilities ---
@@ -492,5 +500,132 @@ elif page == "🤖 Chat with Prometheus":
                             st.info("No direct PromQL generated for this question.")
                         st.markdown("**AI Summary:**")
                         st.text(summary)
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+# --- 🚨 Chat with Alerts Page ---
+elif page == "🚨 Chat with Alerts":
+    st.markdown("<h1>🚨 Chat with Alerts</h1>", unsafe_allow_html=True)
+    st.markdown(f"Currently selected namespace: **{selected_namespace}**")
+    st.markdown(
+        "Ask questions about alerts like: `What alerts were firing yesterday?`, `What does the GPU alert mean?`, `What caused the latency alerts?`"
+    )
+
+    user_question = st.text_input("Your alert question")
+    if st.button("Chat with Alerts"):
+        if not user_question.strip():
+            st.warning("Please enter a question.")
+        else:
+            with st.spinner("Querying alerts..."):
+                try:
+                    response = requests.post(
+                        f"{API_URL}/chat-alerts",
+                        json={
+                            "question": user_question,
+                            "start_ts": selected_start,
+                            "end_ts": selected_end,
+                            "namespace": selected_namespace,
+                            "summarize_model_id": multi_model_name,
+                            "api_key": api_key,
+                        },
+                    )
+                    data = response.json()
+                    summary = data.get("summary", "")
+                    alert_summary = data.get("alert_summary", "")
+                    active_count = data.get("active_alerts_count", 0)
+                    historical_count = data.get("historical_alerts_count", 0)
+
+                    if not summary:
+                        st.error("Error: Missing summary in response from AI.")
+                    else:
+                        # Display alert statistics
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Active Alerts", active_count)
+                        with col2:
+                            st.metric("Historical Alerts", historical_count)
+
+                        # Display alert summary if available
+                        if (
+                            alert_summary
+                            and alert_summary
+                            != "No alerts found in the specified time range."
+                        ):
+                            st.markdown("**Alert Data:**")
+                            st.text(alert_summary)
+
+                        st.markdown("**AI Analysis:**")
+                        st.markdown(summary)
+
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+# --- 🔍 Unified Chat Page ---
+elif page == "🔍 Unified Chat":
+    st.markdown("<h1>🔍 Unified Chat (Metrics + Alerts)</h1>", unsafe_allow_html=True)
+    st.markdown(f"Currently selected namespace: **{selected_namespace}**")
+    st.markdown(
+        "Ask questions about both metrics and alerts: `How are the GPU alerts related to performance?`, `What's the connection between latency and recent alerts?`"
+    )
+
+    # Model selection for unified chat (optional)
+    use_model = st.checkbox("Include specific model analysis", value=False)
+    selected_model = None
+    if use_model:
+        models_list = get_models()
+        selected_model = st.selectbox(
+            "Select Model", models_list, index=0 if models_list else None
+        )
+
+    user_question = st.text_input("Your question (metrics and/or alerts)")
+    if st.button("Unified Analysis"):
+        if not user_question.strip():
+            st.warning("Please enter a question.")
+        else:
+            with st.spinner("Analyzing metrics and alerts..."):
+                try:
+                    response = requests.post(
+                        f"{API_URL}/chat-unified",
+                        json={
+                            "question": user_question,
+                            "start_ts": selected_start,
+                            "end_ts": selected_end,
+                            "namespace": selected_namespace,
+                            "model_name": selected_model,
+                            "summarize_model_id": multi_model_name,
+                            "api_key": api_key,
+                        },
+                    )
+                    data = response.json()
+                    summary = data.get("summary", "")
+                    metrics_data = data.get("metrics_data", "")
+                    alert_summary = data.get("alert_summary", "")
+                    promql = data.get("promql", "")
+
+                    if not summary:
+                        st.error("Error: Missing summary in response from AI.")
+                    else:
+                        # Display PromQL if generated
+                        if promql:
+                            st.markdown("**Generated PromQL:**")
+                            st.code(promql, language="yaml")
+
+                        # Display metrics data if available
+                        if metrics_data:
+                            st.markdown("**Metrics Analysis:**")
+                            st.text(metrics_data)
+
+                        # Display alert summary if available
+                        if (
+                            alert_summary
+                            and alert_summary
+                            != "No alerts found in the specified time range."
+                        ):
+                            st.markdown("**Alert Analysis:**")
+                            st.text(alert_summary)
+
+                        st.markdown("**AI Summary:**")
+                        st.markdown(summary)
+
                 except Exception as e:
                     st.error(f"Error: {e}")
