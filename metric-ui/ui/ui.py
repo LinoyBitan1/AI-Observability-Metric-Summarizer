@@ -458,39 +458,64 @@ elif page == "🤖 Chat with Prometheus":
     st.markdown("<h1>Chat with Prometheus</h1>", unsafe_allow_html=True)
     st.markdown(f"Currently selected namespace: **{selected_namespace}**")
     st.markdown(
-        "Ask questions like: `What's the P95 latency?`, `Is GPU usage stable?`, etc."
+        "Ask questions like: `What's the P95 latency?`, `Is GPU usage stable?`,`'What alerts were firing yesterday?` etc."
     )
-    user_question = st.text_input("Your question")
-    if st.button("Chat with Metrics"):
-        if not user_question.strip():
-            st.warning("Please enter a question.")
-        else:
-            with st.spinner("Querying and summarizing..."):
-                try:
-                    response = requests.post(
-                        f"{API_URL}/chat-metrics",
-                        json={
-                            "model_name": model_name,
-                            "question": user_question,
-                            "start_ts": selected_start,
-                            "end_ts": selected_end,
-                            "namespace": selected_namespace,  # Add namespace to the request
-                            "summarize_model_id": multi_model_name,
-                            "api_key": api_key,
-                        },
-                    )
-                    data = response.json()
-                    promql = data.get("promql", "")
-                    summary = data.get("summary", "")
-                    if not summary:
-                        st.error("Error: Missing summary in response from AI.")
+    # --- Start of change: Chat history management ---
+    if "messages" not in st.session_state:
+        st.session_state.messages = []  # List to store chat messages
+
+    # Display previous chat messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    user_question = st.chat_input("Your question")
+    if user_question:
+        st.session_state.messages.append({"role": "user", "content": user_question})
+        with st.chat_message("user"):
+            st.markdown(user_question)
+
+        with st.spinner("Querying and summarizing..."):
+            try:
+                response = requests.post(
+                    f"{API_URL}/chat-prometheus",
+                    json={
+                        "model_name": model_name,
+                        "question": user_question,
+                        "start_ts": selected_start,
+                        "end_ts": selected_end,
+                        "namespace": selected_namespace,  # Add namespace to the request
+                        "summarize_model_id": multi_model_name,
+                        "api_key": api_key,
+                        "messages": st.session_state.messages,  # Add chat history to the request
+                    },
+                )
+                data = response.json()
+                promql_list = data.get("promql", [])
+                summary = data.get("summary", "")
+                if not summary:
+                    st.error("Error: Missing summary in response from AI.")
+                else:
+                    # Adding AI response to history ---
+                    ai_response_content = ""
+                    if promql_list:
+                        if isinstance(promql_list, str):
+                            promql_list = [promql_list]
+                        for q in promql_list:
+                            ai_response_content += (
+                                "**Generated PromQL:**\n```yaml\n" + q + "\n```\n"
+                            )
                     else:
-                        st.markdown("**Generated PromQL:**")
-                        if promql:
-                            st.code(promql, language="yaml")
-                        else:
-                            st.info("No direct PromQL generated for this question.")
-                        st.markdown("**AI Summary:**")
-                        st.text(summary)
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                        ai_response_content += (
+                            "_No direct PromQL generated for this question._\n"
+                        )
+                    ai_response_content += "**AI Summary:**\n" + summary
+
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": ai_response_content}
+                    )
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_response_content)
+
+            except Exception as e:
+                st.error(f"Error: {e}")

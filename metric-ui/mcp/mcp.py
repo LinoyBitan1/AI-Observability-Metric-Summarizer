@@ -149,6 +149,7 @@ class ChatMetricsRequest(BaseModel):
     namespace: str
     summarize_model_id: str
     api_key: Optional[str] = None
+    messages: Optional[List[Dict[str, str]]] = None
 
 
 class ReportRequest(BaseModel):
@@ -173,6 +174,76 @@ class MetricsCalculationResponse(BaseModel):
 
 
 # --- Helpers ---
+def fetch_alerts_from_prometheus(
+    start_ts: int, end_ts: int, namespace: Optional[str] = None
+):
+    """
+    Fetches firing or inactive alerts directly from Prometheus/Thanos.
+    """
+    headers = {"Authorization": f"Bearer {THANOS_TOKEN}"}
+    # Query for all alerts, including inactive ones for historical context
+    promql_query = f'ALERTS{{namespace="{namespace}"}}' if namespace else "ALERTS"
+
+    response = requests.get(
+        f"{PROMETHEUS_URL}/api/v1/query_range",
+        headers=headers,
+        params={"query": promql_query, "start": start_ts, "end": end_ts, "step": "30s"},
+        verify=verify,
+    )
+    response.raise_for_status()
+    result = response.json()["data"]["result"]
+
+    alerts_data = []
+    for series in result:
+        alertname = series["metric"].get("alertname")
+        severity = series["metric"].get("severity")
+        alertstate = series["metric"].get("alertstate")  # "firing" or "inactive"
+        for_duration = series["metric"].get(
+            "for"
+        )  # This comes from the alert rule itself
+
+        # Include all relevant labels
+        labels = series["metric"]
+
+        for val in series["values"]:
+            timestamp = datetime.fromtimestamp(float(val[0]))
+            # Value indicates 1 for firing, 0 for inactive
+            is_firing = int(float(val[1]))
+
+            alerts_data.append(
+                {
+                    "alertname": alertname,
+                    "severity": severity,
+                    "alertstate": alertstate,
+                    "timestamp": timestamp.isoformat(),
+                    "is_firing": is_firing,
+                    "for_duration": for_duration,
+                    "labels": labels,  # Include all labels for more context
+                }
+            )
+    return promql_query, alerts_data
+
+
+def fetch_alert_definition(alertname):
+    try:
+        response = requests.get(f"{PROMETHEUS_URL}/api/v1/rules", verify=verify)
+        response.raise_for_status()
+        rules = response.json()["data"]["groups"]
+        for group in rules:
+            for rule in group.get("rules", []):
+                if rule.get("name") == alertname or rule.get("alert") == alertname:
+                    return {
+                        "name": alertname,
+                        "expr": rule.get("expr"),
+                        "for": rule.get("for"),
+                        "labels": rule.get("labels"),
+                        "annotations": rule.get("annotations"),
+                    }
+    except Exception as e:
+        print(f"Error fetching alert definition: {e}")
+    return None
+
+
 def fetch_metrics(query, model_name, start, end, namespace=None):
     # If namespace is provided, ensure it's included in the query
     if namespace:
@@ -363,13 +434,23 @@ def _clean_llm_summary_string(text: str) -> str:
 
 
 def summarize_with_llm(
-    prompt: str, summarize_model_id: str, api_key: Optional[str] = None
+    prompt: str,
+    summarize_model_id: str,
+    api_key: Optional[str] = None,
+    messages: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     headers = {"Content-Type": "application/json"}
 
     # Get model configuration
     model_info = MODEL_CONFIG.get(summarize_model_id, {})
     is_external = model_info.get("external", False)
+
+    # Building LLM messages array
+    llm_messages = []
+    if messages:
+        llm_messages.extend(messages)
+    # Ensure the new prompt is always added as the last user message
+    llm_messages.append({"role": "user", "content": prompt})
 
     if is_external:
         # External model (like OpenAI, Anthropic, etc.)
@@ -388,7 +469,7 @@ def summarize_with_llm(
         # Convert to OpenAI chat format
         payload = {
             "model": model_name,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": llm_messages,
             "temperature": 0.5,
             "max_tokens": 1000,
         }
@@ -399,13 +480,20 @@ def summarize_with_llm(
         )
 
     else:
-        # Local model (deployed in cluster)
+        # Local model (LlamaStack): use "prompt"
         if LLM_API_TOKEN:
             headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
 
+        # Combine all messages into a single prompt (if you want to keep chat context)
+        prompt_text = ""
+        if messages:
+            for msg in messages:
+                prompt_text += f"{msg['role']}: {msg['content']}\n"
+        prompt_text += prompt  # Add the current prompt
+
         payload = {
             "model": summarize_model_id,
-            "prompt": prompt,
+            "prompt": prompt_text,
             "temperature": 0.5,
             "max_tokens": 1000,
         }
@@ -557,8 +645,8 @@ def chat(req: ChatRequest):
 def build_flexible_llm_prompt(
     question: str,
     model_name: str,
-    metrics_data_summary: str,
-    generated_tokens_sum: float = None,
+    context_summary: str,
+    generated_tokens_sum: Optional[float] = None,
     selected_namespace: str = None,
 ) -> str:
     metrics_list = "\n".join(
@@ -583,9 +671,10 @@ Your task: Given the user's question and the current metric status, provide a Pr
 Available Metrics:
 {metrics_list}
 
-Current Metric Status:
-{metrics_data_summary.strip()}
-
+{context_summary}
+    Your task: Given the user's question, provide a PromQL query (if relevant) and a summary.
+    The summary should be concise, insightful, and integrate information from both metrics and alerts if applicable.
+    If the question is about an alert's meaning, explain its PromQL expression and duration.
 IMPORTANT: Respond with a single, complete JSON object with EXACTLY two fields:
 "promql": (string) A relevant PromQL query (empty string if not applicable). Do NOT include a namespace label in the PromQL query.
 "summary": (string) Write a short, thoughtful paragraph as if you are advising a team of engineers. Offer clear, actionable insights, and sound like a senior technical leader. Use plain text only. Do NOT use markdown or any nested JSON-like structures within this string. Include actual values from "Current Metric Status" when relevant.
@@ -606,17 +695,10 @@ Question: {question}
 Response:""".strip()
 
 
-@app.post("/chat-metrics")
+@app.post("/chat-prometheus")
 def chat_metrics(req: ChatMetricsRequest):
     # Determine if the question is about listing all models globally or namespace-specific
     question_lower = req.question.lower()
-    is_all_models_query = (
-        "all models currently deployed" in question_lower
-        or "list all models" in question_lower
-        or "what models are deployed" in question_lower.replace("?", "")
-    )
-    is_tokens_generated_query = "how many tokens generated" in question_lower
-
     metrics_data_summary = ""
     generated_tokens_sum_value = None
 
@@ -626,6 +708,13 @@ def chat_metrics(req: ChatMetricsRequest):
         )
         for label, query in ALL_METRICS.items()
     }
+
+    is_all_models_query = (
+        "all models currently deployed" in question_lower
+        or "list all models" in question_lower
+        or "what models are deployed" in question_lower.replace("?", "")
+    )
+    is_tokens_generated_query = "how many tokens generated" in question_lower
 
     if is_tokens_generated_query:
         output_tokens_df = metric_dfs.get("Output Tokens Created")
@@ -655,14 +744,86 @@ def chat_metrics(req: ChatMetricsRequest):
         # Reuse existing summary builder for the selected model's metrics
         metrics_data_summary = build_prompt(metric_dfs, req.model_name)
 
+    # Fetch Alert Data
+    promql_query_alerts, alerts_data = fetch_alerts_from_prometheus(
+        req.start_ts, req.end_ts, req.namespace
+    )
+    # Prepare alert context for the LLM
+    alert_summary = ""
+    if alerts_data:
+        firing_alerts = [a for a in alerts_data if a["is_firing"] == 1]
+        inactive_alerts = [a for a in alerts_data if a["is_firing"] == 0]
+        if firing_alerts:
+            alert_summary += "\n\nCurrently Firing Alerts:\n"
+            for alert in firing_alerts:
+                alert_summary += f"- {alert['alertname']} (Severity: {alert['severity']}, Started: {alert['timestamp']})\n"
+        if inactive_alerts:
+            alert_summary += "\n\nHistorical/Inactive Alerts in Time Range:\n"
+            for alert in inactive_alerts:
+                alert_summary += f"- {alert['alertname']} (State: {alert['alertstate']}, Timestamp: {alert['timestamp']})\n"
+    else:
+        alert_summary = "\n\nNo alerts found in the specified time range."
+
+    # Handle specific alert meaning questions
+    alert_meaning_info = ""
+    alert_name_match = re.search(r"what does (.+) alert mean", question_lower)
+    if alert_name_match:
+        requested_alert_name = alert_name_match.group(1).strip()
+        requested_alert_name_cleaned = (
+            requested_alert_name.replace(" ", "").replace("-", "").lower()
+        )
+
+        matched_alert_name = None
+        for alert in alerts_data:
+            if (
+                alert["alertname"].replace(" ", "").replace("-", "").lower()
+                == requested_alert_name_cleaned
+            ):
+                matched_alert_name = alert["alertname"]
+                break
+
+        if not matched_alert_name:
+            for alert in alerts_data:
+                if (
+                    requested_alert_name_cleaned
+                    in alert["alertname"].replace(" ", "").replace("-", "").lower()
+                ):
+                    matched_alert_name = alert["alertname"]
+                    break
+
+        if matched_alert_name:
+            definition = fetch_alert_definition(matched_alert_name)
+            if definition:
+                alert_meaning_info = (
+                    f"\n\nDefinition for alert '{matched_alert_name}':\n"
+                    f"  Expression: `{definition['expr']}`\n"
+                    f"  Duration: `{definition['for']}`\n"
+                    "  This means the alert triggers when the condition defined by the expression is met for the specified duration."
+                )
+            else:
+                alert_meaning_info = f"\n\nCould not find a detailed definition for alert '{matched_alert_name}' from Prometheus rules."
+        else:
+            alert_meaning_info = f"\n\nAlert '{requested_alert_name}' not found in current alerts data or Prometheus rule definitions."
+
+    full_prompt_context = f"""
+    Current Metric Status:
+    {metrics_data_summary.strip()}
+
+    Alert Status:
+    {alert_summary.strip()}
+
+    {alert_meaning_info.strip()}
+    """
     prompt = build_flexible_llm_prompt(
         req.question,
         req.model_name,
-        metrics_data_summary,
+        full_prompt_context,
         generated_tokens_sum=generated_tokens_sum_value,
         selected_namespace=req.namespace,
     )
-    llm_response = summarize_with_llm(prompt, req.summarize_model_id, req.api_key)
+    llm_response = summarize_with_llm(
+        prompt, req.summarize_model_id, req.api_key, messages=req.messages
+    )
 
     # Debug LLM response
     print("🧠 Raw LLM response:", llm_response)
@@ -716,24 +877,29 @@ def chat_metrics(req: ChatMetricsRequest):
         parsed = json.loads(json_string)
 
         # Extract and clean the fields
-        promql = parsed.get("promql", "").strip()
+        promql_from_llm = parsed.get("promql", "").strip()
         summary = _clean_llm_summary_string(parsed.get("summary", ""))
 
-        # Aggressively ensure the correct namespace is in PromQL
-        if promql:
-            # Remove existing namespace labels from PromQL if present
-            promql = re.sub(r"\{([^}]*)namespace=[^,}]*(,)?", r"{\1", promql)
-            # Add the correct namespace. Handle cases where there are no existing labels or existing labels.
-            if "{" in promql:
-                promql = promql.replace("{", f"{{namespace='{req.namespace}', ")
-            else:
-                # If no existing curly braces, add them with the namespace
-                promql = f"{promql}{{namespace='{req.namespace}'}}"
+        # Compose the queries you actually used
+        queries_used = []
 
-        if not summary:
-            raise ValueError("Empty summary in response")
+        # If the LLM returned a promql, use it (for metrics)
+        if promql_from_llm:
+            queries_used.append(promql_from_llm)
 
-        return {"promql": promql, "summary": summary}
+        # If alerts were fetched, always add the actual ALERTS query used
+        if (
+            alerts_data
+            and promql_query_alerts
+            and promql_query_alerts not in queries_used
+        ):
+            queries_used.append(promql_query_alerts)
+
+        # If no queries were found, set to empty string for backward compatibility
+        if not queries_used:
+            queries_used = [""]
+
+        return {"promql": queries_used, "summary": summary}
 
     except json.JSONDecodeError as e:
         print(f"⚠️ JSON Decode Error: {e}")
