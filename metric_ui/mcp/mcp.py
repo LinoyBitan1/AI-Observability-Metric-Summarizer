@@ -1,16 +1,19 @@
+from ast import Tuple
 import base64
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import pandas as pd
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from scipy.stats import linregress
 import os
 import json
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import uuid
+from collections import defaultdict
+from datetime import datetime
 
 from report_assets.report_renderer import (
     generate_html_report,
@@ -19,7 +22,7 @@ from report_assets.report_renderer import (
     ReportSchema,
     MetricCard,
 )
-
+import mock_alerts
 
 app = FastAPI()
 
@@ -53,6 +56,7 @@ verify = CA_BUNDLE_PATH if os.path.exists(CA_BUNDLE_PATH) else True
 
 # --- Dynamic Metric Discovery Functions ---
 
+
 def discover_vllm_metrics():
     """Dynamically discover available vLLM metrics from Prometheus, including GPU metrics"""
     try:
@@ -64,40 +68,46 @@ def discover_vllm_metrics():
         )
         response.raise_for_status()
         all_metrics = response.json()["data"]
-        
+
         # Create friendly names for metrics
         metric_mapping = {}
-        
+
         # First, add GPU metrics (DCGM) that are relevant for vLLM monitoring
         gpu_metrics = {
             "GPU Temperature (°C)": "DCGM_FI_DEV_GPU_TEMP",
-            "GPU Power Usage (Watts)": "DCGM_FI_DEV_POWER_USAGE", 
+            "GPU Power Usage (Watts)": "DCGM_FI_DEV_POWER_USAGE",
             "GPU Memory Usage (GB)": "DCGM_FI_DEV_FB_USED / (1024*1024*1024)",
             "GPU Energy Consumption (Joules)": "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION",
             "GPU Memory Temperature (°C)": "DCGM_FI_DEV_MEMORY_TEMP",
             "GPU Utilization (%)": "DCGM_FI_DEV_GPU_UTIL",
         }
-        
+
         for friendly_name, metric_name in gpu_metrics.items():
             if metric_name in all_metrics:
                 metric_mapping[friendly_name] = f"avg({metric_name})"
-        
+
         # Filter for vLLM metrics
         vllm_metrics = [metric for metric in all_metrics if metric.startswith("vllm:")]
-        
+
         # Add vLLM-specific metrics
         for metric in vllm_metrics:
             # Convert metric name to friendly display name
             friendly_name = metric.replace("vllm:", "").replace("_", " ").title()
-            
+
             # Special handling for common metrics
             if "token" in metric.lower() and "prompt" in metric.lower():
                 friendly_name = "Prompt Tokens Created"
-            elif "token" in metric.lower() and ("generation" in metric.lower() or "output" in metric.lower()):
+            elif "token" in metric.lower() and (
+                "generation" in metric.lower() or "output" in metric.lower()
+            ):
                 friendly_name = "Output Tokens Created"
             elif "latency" in metric.lower() and "e2e" in metric.lower():
                 friendly_name = "P95 Latency (s)"
-            elif "gpu" in metric.lower() and "usage" in metric.lower() and "perc" in metric.lower():
+            elif (
+                "gpu" in metric.lower()
+                and "usage" in metric.lower()
+                and "perc" in metric.lower()
+            ):
                 friendly_name = "GPU Usage (%)"
             elif "request" in metric.lower() and "running" in metric.lower():
                 friendly_name = "Requests Running"
@@ -106,9 +116,9 @@ def discover_vllm_metrics():
             else:
                 # Keep original friendly conversion
                 friendly_name = metric.replace("vllm:", "").replace("_", " ").title()
-                
+
             metric_mapping[friendly_name] = metric
-            
+
         return metric_mapping
     except Exception as e:
         print(f"Error discovering vLLM metrics: {e}")
@@ -127,6 +137,7 @@ def discover_vllm_metrics():
             "Inference Time (s)": "vllm:request_inference_time_seconds_count",
         }
 
+
 def discover_dcgm_metrics():
     """Dynamically discover available DCGM GPU metrics"""
     try:
@@ -138,14 +149,14 @@ def discover_dcgm_metrics():
         )
         response.raise_for_status()
         all_metrics = response.json()["data"]
-        
+
         # Filter for DCGM metrics
         dcgm_metrics = [metric for metric in all_metrics if metric.startswith("DCGM_")]
-        
+
         # Create a mapping of useful DCGM metrics for fleet monitoring
         dcgm_mapping = {}
         fb_used_metric = None
-        
+
         for metric in dcgm_metrics:
             if "GPU_TEMP" in metric:
                 dcgm_mapping["GPU Temperature (°C)"] = f"avg({metric})"
@@ -166,15 +177,18 @@ def discover_dcgm_metrics():
                 dcgm_mapping["GPU SM Clock (MHz)"] = f"avg({metric})"
             elif "MEM_CLOCK" in metric:
                 dcgm_mapping["GPU Memory Clock (MHz)"] = f"avg({metric})"
-        
+
         # Add GPU Memory Usage in GB if we found the FB_USED metric
         if fb_used_metric:
-            dcgm_mapping["GPU Memory Usage (GB)"] = f"avg({fb_used_metric}) / (1024*1024*1024)"
-        
+            dcgm_mapping["GPU Memory Usage (GB)"] = (
+                f"avg({fb_used_metric}) / (1024*1024*1024)"
+            )
+
         return dcgm_mapping
     except Exception as e:
         print(f"Error discovering DCGM metrics: {e}")
         return {}
+
 
 def discover_openshift_metrics():
     """Return static, well-tested OpenShift/Kubernetes metrics organized by category"""
@@ -197,7 +211,6 @@ def discover_openshift_metrics():
             "Container CPU Usage": "sum(rate(container_cpu_usage_seconds_total[5m]))",
             "Container Memory Usage": "sum(container_memory_usage_bytes)",
         },
-
         "GPU & Accelerators": {
             # 🚀 Comprehensive GPU fleet monitoring with DCGM metrics
             "GPU Temperature (°C)": "avg(DCGM_FI_DEV_GPU_TEMP)",
@@ -227,32 +240,43 @@ def discover_openshift_metrics():
         },
     }
 
+
 # Cache discovered metrics to avoid repeated API calls
 _vllm_metrics_cache = None
 _openshift_metrics_cache = None
 _cache_timestamp = None
 CACHE_TTL = 300  # 5 minutes
 
+
 def get_vllm_metrics():
     """Get vLLM metrics with caching"""
     global _vllm_metrics_cache, _cache_timestamp
-    
+
     current_time = datetime.now().timestamp()
-    if _vllm_metrics_cache is None or _cache_timestamp is None or (current_time - _cache_timestamp) > CACHE_TTL:
+    if (
+        _vllm_metrics_cache is None
+        or _cache_timestamp is None
+        or (current_time - _cache_timestamp) > CACHE_TTL
+    ):
         _vllm_metrics_cache = discover_vllm_metrics()
         _cache_timestamp = current_time
-    
+
     return _vllm_metrics_cache
+
 
 def get_openshift_metrics():
     """Get OpenShift metrics with caching"""
     global _openshift_metrics_cache, _cache_timestamp
-    
+
     current_time = datetime.now().timestamp()
-    if _openshift_metrics_cache is None or _cache_timestamp is None or (current_time - _cache_timestamp) > CACHE_TTL:
+    if (
+        _openshift_metrics_cache is None
+        or _cache_timestamp is None
+        or (current_time - _cache_timestamp) > CACHE_TTL
+    ):
         _openshift_metrics_cache = discover_openshift_metrics()
         _cache_timestamp = current_time
-    
+
     return _openshift_metrics_cache
 
 
@@ -273,7 +297,7 @@ class ChatRequest(BaseModel):
     api_key: Optional[str] = None
 
 
-class ChatMetricsRequest(BaseModel):
+class ChatPrometheusRequest(BaseModel):
     model_name: str
     question: str
     start_ts: int
@@ -281,6 +305,7 @@ class ChatMetricsRequest(BaseModel):
     namespace: str
     summarize_model_id: str
     api_key: Optional[str] = None
+    messages: Optional[List[Dict[str, str]]] = None
 
 
 class ReportRequest(BaseModel):
@@ -305,6 +330,151 @@ class MetricsCalculationResponse(BaseModel):
 
 
 # --- Helpers ---
+def _structure_mock_data_like_prometheus_api(
+    start_ts: int, end_ts: int, namespace: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Transforms a flat list of alerts into the nested structure of the Prometheus API.
+    """
+    series_map = defaultdict(list)
+    for alert in mock_alerts.MOCK_ALERTS_HISTORY:
+        # CORRECTED LINE: Using datetime.datetime to access the class
+        alert_start_ts = datetime.fromisoformat(alert["timestamp"]).timestamp()
+
+        # ... (rest of the function is the same)
+        for i in range(5):
+            point_ts = alert_start_ts + (i * 30)
+            if start_ts <= point_ts <= end_ts:
+                is_namespace_match = (
+                    namespace is None or alert["labels"].get("namespace") == namespace
+                )
+                if is_namespace_match:
+                    labels_tuple = tuple(sorted(alert["labels"].items()))
+                    series_map[labels_tuple].append(
+                        [point_ts, str(alert.get("is_firing", 1))]
+                    )
+
+    result_list = []
+    for labels_tuple, values in series_map.items():
+        unique_values = sorted(list(dict(values).items()))
+        result_list.append({"metric": dict(labels_tuple), "values": unique_values})
+    return {"data": {"result": result_list}}
+
+
+# --- Main Mock Function (Corrected) ---
+def fetch_alerts_from_prometheus_mock(
+    start_ts: int, end_ts: int, namespace: Optional[str] = None
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    A mocked version that perfectly mimics the real function's behavior.
+    """
+    print("--- Using MOCKED alert data ---")
+    print("start_ts", start_ts)
+    print("end_ts", end_ts)
+
+    promql_query = f'ALERTS{{namespace="{namespace}"}}' if namespace else "ALERTS"
+    structured_data = _structure_mock_data_like_prometheus_api(
+        start_ts, end_ts, namespace
+    )
+    result = structured_data["data"]["result"]
+    print("result", result)
+    alerts_data = []
+    for series in result:
+        metric_labels = series.get("metric", {})
+        alertname = metric_labels.get("alertname")
+        severity = metric_labels.get("severity")
+        alertstate = metric_labels.get("alertstate")
+
+        for val in series.get("values", []):
+            # CORRECTED LINE: Using datetime.datetime and datetime.timezone
+            timestamp = datetime.fromtimestamp(float(val[0]), tz=timezone.utc)
+            is_firing = int(float(val[1]))
+
+            alerts_data.append(
+                {
+                    "alertname": alertname,
+                    "severity": severity,
+                    "alertstate": alertstate,
+                    "timestamp": timestamp.isoformat(),
+                    "is_firing": is_firing,
+                    "labels": metric_labels,
+                }
+            )
+    print("alerts_data", alerts_data)
+    print("promql_query", promql_query)
+    return promql_query, alerts_data
+
+
+def fetch_alerts_from_prometheus(
+    start_ts: int, end_ts: int, namespace: Optional[str] = None
+):
+    """
+    Fetches firing or inactive alerts directly from Prometheus/Thanos.
+    """
+    headers = {"Authorization": f"Bearer {THANOS_TOKEN}"}
+    # Query for all alerts, including inactive ones for historical context
+    promql_query = f'ALERTS{{namespace="{namespace}"}}' if namespace else "ALERTS"
+
+    response = requests.get(
+        f"{PROMETHEUS_URL}/api/v1/query_range",
+        headers=headers,
+        params={"query": promql_query, "start": start_ts, "end": end_ts, "step": "30s"},
+        verify=verify,
+    )
+    response.raise_for_status()
+    result = response.json()["data"]["result"]
+
+    alerts_data = []
+    for series in result:
+        alertname = series["metric"].get("alertname")
+        severity = series["metric"].get("severity")
+        alertstate = series["metric"].get("alertstate")  # "firing" or "inactive"
+        for_duration = series["metric"].get(
+            "for"
+        )  # This comes from the alert rule itself
+
+        # Include all relevant labels
+        labels = series["metric"]
+
+        for val in series["values"]:
+            timestamp = datetime.fromtimestamp(float(val[0]))
+            # Value indicates 1 for firing, 0 for inactive
+            is_firing = int(float(val[1]))
+
+            alerts_data.append(
+                {
+                    "alertname": alertname,
+                    "severity": severity,
+                    "alertstate": alertstate,
+                    "timestamp": timestamp.isoformat(),
+                    "is_firing": is_firing,
+                    "for_duration": for_duration,
+                    "labels": labels,  # Include all labels for more context
+                }
+            )
+    return promql_query, alerts_data
+
+
+def fetch_alert_definition(alertname):
+    try:
+        response = requests.get(f"{PROMETHEUS_URL}/api/v1/rules", verify=verify)
+        response.raise_for_status()
+        rules = response.json()["data"]["groups"]
+        for group in rules:
+            for rule in group.get("rules", []):
+                if rule.get("name") == alertname or rule.get("alert") == alertname:
+                    return {
+                        "name": alertname,
+                        "expr": rule.get("expr"),
+                        "for": rule.get("for"),
+                        "labels": rule.get("labels"),
+                        "annotations": rule.get("annotations"),
+                    }
+    except Exception as e:
+        print(f"Error fetching alert definition: {e}")
+    return None
+
+
 def fetch_metrics(query, model_name, start, end, namespace=None):
     # Handle GPU metrics that don't have model_name labels (they're global/node-level metrics)
     if query.startswith("avg(DCGM_") or "DCGM_" in query:
@@ -318,9 +488,7 @@ def fetch_metrics(query, model_name, start, end, namespace=None):
                 model_namespace, actual_model_name = map(
                     str.strip, model_name.split("|", 1)
                 )
-                promql_query = (
-                    f'{query}{{model_name="{actual_model_name}", namespace="{namespace}"}}'
-                )
+                promql_query = f'{query}{{model_name="{actual_model_name}", namespace="{namespace}"}}'
             else:
                 promql_query = (
                     f'{query}{{model_name="{model_name}", namespace="{namespace}"}}'
@@ -351,11 +519,11 @@ def fetch_metrics(query, model_name, start, end, namespace=None):
         for val in series["values"]:
             ts = datetime.fromtimestamp(float(val[0]))
             value = float(val[1])
-            
+
             # Handle NaN values that can't be JSON serialized
             if pd.isna(value) or value != value:  # Check for NaN
                 value = 0.0  # Convert NaN to 0 for JSON compatibility
-            
+
             row = dict(series["metric"])
             row["timestamp"] = ts
             row["value"] = value
@@ -505,13 +673,23 @@ def _clean_llm_summary_string(text: str) -> str:
 
 
 def summarize_with_llm(
-    prompt: str, summarize_model_id: str, api_key: Optional[str] = None
+    prompt: str,
+    summarize_model_id: str,
+    api_key: Optional[str] = None,
+    messages: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     headers = {"Content-Type": "application/json"}
 
     # Get model configuration
     model_info = MODEL_CONFIG.get(summarize_model_id, {})
     is_external = model_info.get("external", False)
+
+    # Building LLM messages array
+    llm_messages = []
+    if messages:
+        llm_messages.extend(messages)
+    # Ensure the new prompt is always added as the last user message
+    llm_messages.append({"role": "user", "content": prompt})
 
     if is_external:
         # External model (like OpenAI, Anthropic, etc.)
@@ -530,7 +708,7 @@ def summarize_with_llm(
         # Convert to OpenAI chat format
         payload = {
             "model": model_name,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": llm_messages,
             "temperature": 0.5,
             "max_tokens": 1000,
         }
@@ -545,9 +723,16 @@ def summarize_with_llm(
         if LLM_API_TOKEN:
             headers["Authorization"] = f"Bearer {LLM_API_TOKEN}"
 
+        # Combine all messages into a single prompt (if you want to keep chat context)
+        prompt_text = ""
+        if messages:
+            for msg in messages:
+                prompt_text += f"{msg['role']}: {msg['content']}\n"
+        prompt_text += prompt  # Add the current prompt
+
         payload = {
             "model": summarize_model_id,
-            "prompt": prompt,
+            "prompt": prompt_text,
             "temperature": 0.5,
             "max_tokens": 1000,
         }
@@ -570,25 +755,21 @@ def health():
 def _get_models_helper():
     try:
         headers = {"Authorization": f"Bearer {THANOS_TOKEN}"}
-        
+
         # Try multiple vLLM metrics with longer time windows
         vllm_metrics_to_check = [
             "vllm:request_prompt_tokens_created",
-            "vllm:request_prompt_tokens_total", 
+            "vllm:request_prompt_tokens_total",
             "vllm:avg_generation_throughput_toks_per_s",
             "vllm:num_requests_running",
-            "vllm:gpu_cache_usage_perc"
+            "vllm:gpu_cache_usage_perc",
         ]
-        
+
         model_set = set()
-        
+
         # Try different time windows: 7 days, 24 hours, 1 hour
-        time_windows = [
-            7 * 24 * 3600,  # 7 days
-            24 * 3600,      # 24 hours  
-            3600            # 1 hour
-        ]
-        
+        time_windows = [7 * 24 * 3600, 24 * 3600, 3600]  # 7 days  # 24 hours  # 1 hour
+
         for time_window in time_windows:
             for metric_name in vllm_metrics_to_check:
                 try:
@@ -610,15 +791,17 @@ def _get_models_helper():
                         namespace = entry.get("namespace", "").strip()
                         if model and namespace:
                             model_set.add(f"{namespace} | {model}")
-                    
+
                     # If we found models, return them
                     if model_set:
                         return sorted(list(model_set))
-                        
+
                 except Exception as e:
-                    print(f"Error checking {metric_name} with {time_window}s window: {e}")
+                    print(
+                        f"Error checking {metric_name} with {time_window}s window: {e}"
+                    )
                     continue
-        
+
         return sorted(list(model_set))
     except Exception as e:
         print("Error getting models:", e)
@@ -634,25 +817,21 @@ def list_models():
 def list_namespaces():
     try:
         headers = {"Authorization": f"Bearer {THANOS_TOKEN}"}
-        
+
         # Try multiple vLLM metrics with longer time windows
         vllm_metrics_to_check = [
             "vllm:request_prompt_tokens_created",
-            "vllm:request_prompt_tokens_total", 
+            "vllm:request_prompt_tokens_total",
             "vllm:avg_generation_throughput_toks_per_s",
             "vllm:num_requests_running",
-            "vllm:gpu_cache_usage_perc"
+            "vllm:gpu_cache_usage_perc",
         ]
-        
+
         namespace_set = set()
-        
+
         # Try different time windows: 7 days, 24 hours, 1 hour
-        time_windows = [
-            7 * 24 * 3600,  # 7 days
-            24 * 3600,      # 24 hours  
-            3600            # 1 hour
-        ]
-        
+        time_windows = [7 * 24 * 3600, 24 * 3600, 3600]  # 7 days  # 24 hours  # 1 hour
+
         for time_window in time_windows:
             for metric_name in vllm_metrics_to_check:
                 try:
@@ -674,15 +853,17 @@ def list_namespaces():
                         model = entry.get("model_name", "").strip()
                         if namespace and model:
                             namespace_set.add(namespace)
-                    
+
                     # If we found namespaces, return them
                     if namespace_set:
                         return sorted(list(namespace_set))
-                        
+
                 except Exception as e:
-                    print(f"Error checking {metric_name} with {time_window}s window: {e}")
+                    print(
+                        f"Error checking {metric_name} with {time_window}s window: {e}"
+                    )
                     continue
-        
+
         return sorted(list(namespace_set))
     except Exception as e:
         print("Error getting namespaces:", e)
@@ -755,12 +936,95 @@ def chat(req: ChatRequest):
         )
 
 
+def format_alerts_for_ui(alerts_data: list, alert_definitions: dict = None) -> str:
+    """
+    Takes a list of alerts and formats them into a clean, structured
+    markdown string suitable for the UI, including alert meanings if available.
+    """
+    if not alerts_data:
+        return "No relevant alerts were firing in the specified time range."
+
+    # Use a dictionary to show each unique alert only once
+    unique_alerts = {
+        (alert["alertname"], alert["labels"].get("pod")): alert for alert in alerts_data
+    }.values()
+
+    # Sort alerts by severity (critical first), then by name
+    sorted_alerts = sorted(
+        unique_alerts, key=lambda x: (x.get("severity", "z"), x["alertname"])
+    )
+
+    summary_lines = []
+
+    # Try to get the date from the first alert for the headline
+    try:
+        first_alert_date = datetime.fromisoformat(
+            sorted_alerts[0]["timestamp"]
+        ).strftime("%B %dth, %Y")
+        summary_lines.append(
+            f"On {first_alert_date}, the following alerts were firing:"
+        )
+    except (ValueError, IndexError):
+        summary_lines.append(
+            "During the selected time range, the following alerts were firing:"
+        )
+
+    # Create a bulleted list for the UI
+    for alert in sorted_alerts:
+        alert_name = alert.get("alertname", "UnknownAlert")
+        severity = alert.get("severity", "unknown")
+        meaning = alert.get("meaning")
+        if not meaning and alert_definitions and alert_name in alert_definitions:
+            meaning = alert_definitions[alert_name]
+        summary_lines.append(
+            f"- **{alert_name}**: This alert, with severity **{severity}**, was firing."
+            + (f" Meaning: {meaning}" if meaning else "")
+        )
+
+    return "\n".join(summary_lines)
+
+
+def fetch_all_alert_definitions_from_prometheus():
+    """
+    Fetch all alert definitions from Prometheus /api/v1/rules endpoint.
+    Returns a dict mapping alertname to a human-readable description/meaning.
+    """
+    try:
+        response = requests.get(f"{PROMETHEUS_URL}/api/v1/rules", verify=verify)
+        response.raise_for_status()
+        rules = response.json()["data"]["groups"]
+        alert_definitions = {}
+        for group in rules:
+            for rule in group.get("rules", []):
+                alertname = rule.get("alert") or rule.get("name")
+                if alertname:
+                    # Prefer 'summary' annotation, fallback to 'description', fallback to expr
+                    annotations = rule.get("annotations", {})
+                    summary = annotations.get("summary")
+                    description = annotations.get("description")
+                    expr = rule.get("expr")
+                    if summary:
+                        meaning = summary
+                    elif description:
+                        meaning = description
+                    elif expr:
+                        meaning = f"Alert fires when: {expr}"
+                    else:
+                        meaning = "No description available."
+                    alert_definitions[alertname] = meaning
+        return alert_definitions
+    except Exception as e:
+        print(f"Error fetching alert definitions from Prometheus: {e}")
+        return None
+
+
 def build_flexible_llm_prompt(
     question: str,
     model_name: str,
-    metrics_data_summary: str,
-    generated_tokens_sum: float = None,
-    selected_namespace: str = None,
+    context_summary: str,
+    generated_tokens_sum: Optional[float] = None,
+    selected_namespace: str = "",
+    alert_definitions: Optional[dict] = None,
 ) -> str:
     vllm_metrics = get_vllm_metrics()
     metrics_list = "\n".join(
@@ -772,25 +1036,39 @@ def build_flexible_llm_prompt(
         summary_tokens_generated = f"A total of {generated_tokens_sum:.2f} tokens were generated across all models and namespaces."
 
     namespace_context = (
-        f"You are currently focused on the namespace: **{selected_namespace}**\n\n"
+        f"You are currently focused on the namespace: **{selected_namespace}** and model **{model_name}**.\n\n"
         if selected_namespace
         else ""
     )
 
+    # If alert_definitions is provided, add a section listing all alert meanings
+    alert_meanings_section = ""
+    if alert_definitions:
+        alert_meanings_section = "\n\nAlert Definitions (for reference):\n"
+        for alert_name, meaning in alert_definitions.items():
+            alert_meanings_section += f"- {alert_name}: {meaning}\n"
+
     return f"""
 {namespace_context}You are a distinguished engineer and MLOps expert, renowned for your ability to synthesize complex operational data into clear, insightful recommendations.
 
-Your task: Given the user's question and the current metric status, provide a PromQL query and a summary.
+Your task: Given the user's question, provide a PromQL query and a summary.
 
-Available Metrics:
+Available Metrics to Query in PromQL:
 {metrics_list}
 
-Current Metric Status:
-{metrics_data_summary.strip()}
+Current Operational Status (Metrics and Alerts):
+{context_summary.strip()}
+{summary_tokens_generated.strip()}
+{alert_meanings_section}
 
-IMPORTANT: Respond with a single, complete JSON object with EXACTLY two fields:
-"promql": (string) A relevant PromQL query (empty string if not applicable). Do NOT include a namespace label in the PromQL query.
-"summary": (string) Write a short, thoughtful paragraph as if you are advising a team of engineers. Offer clear, actionable insights, and sound like a senior technical leader. Use plain text only. Do NOT use markdown or any nested JSON-like structures within this string. Include actual values from "Current Metric Status" when relevant.
+IMPORTANT:
+- The "Alert Status" section below is grouped by date and lists only currently firing alerts.
+- If the user asks about alerts, reference the alert names, severities, and timestamps as shown in the Alert Status section.
+- For each alert, if possible, briefly explain what it means (e.g., "VLLMHighP95Latency: This alert means the 95th percentile latency for VLLM is above the threshold").
+- Use the grouped alert list directly in your answer if relevant, and keep the format clear and concise for UI display.
+- Respond with a single, complete JSON object with EXACTLY two fields:
+  - "promql": (string) A relevant PromQL query (empty string if not applicable). Do NOT include a namespace label in the PromQL query, the system will add it automatically.
+  - "summary": (string) Write a short, thoughtful paragraph as if you are advising a team of engineers. Offer clear, actionable insights, and sound like a senior technical leader. Use plain text only. Do NOT use markdown or any nested JSON-like structures within this string. Include actual values from "Current Operational Status" when relevant.
 
 Rules for JSON output:
 - Use double quotes for all keys and string values.
@@ -798,37 +1076,48 @@ Rules for JSON output:
 - No line breaks within string values.
 - No comments.
 
-Example:
+Example for an alert question:
 {{
-  "promql": "count by(model_name) (vllm:request_prompt_tokens_created)",
-  "summary": "Based on the current metrics, the system is operating within expected parameters. However, I recommend monitoring the request rate closely as a precaution. If you anticipate increased load, consider scaling resources proactively to maintain performance."
+  "promql": "ALERTS{{namespace=\"m2\"}}",
+  "summary": "On 2025-06-30, the following alerts were firing: VLLMHighP95Latency: with Severity: critical, Started: 2025-06-30T16:50:36. This alert means the 95th percentile latency for VLLM is above the threshold. VLLMHighAverageInferenceTime: with Severity: warning, Started: 2025-06-30T16:50:36. This alert means the average inference time for the model is higher than expected. Please investigate these issues to maintain system performance."
 }}
 
+Example for a metrics question:
+{{
+  "promql": "count by(model_name) (vllm:request_prompt_tokens_created)",
+  "summary": "On 2025-06-30, the following alerts were firing: 
+                - VLLMHighP95Latency: with Severity: critical, Started: 2025-06-30T16:50:36. 
+                  This alert means the 95th percentile latency for VLLM is above the threshold. 
+                - VLLMHighAverageInferenceTime: with Severity: warning, Started: 2025-06-30T16:50:36. 
+                  This alert means the average inference time for the model is higher than expected. 
+            Please investigate these issues to maintain system performance."
+}}
 Question: {question}
 Response:""".strip()
 
 
-@app.post("/chat-metrics")
-def chat_metrics(req: ChatMetricsRequest):
+@app.post("/chat-prometheus")
+def chat_prometheus(req: ChatPrometheusRequest):
     # Determine if the question is about listing all models globally or namespace-specific
     question_lower = req.question.lower()
+    metrics_data_summary = ""
+    generated_tokens_sum_value = None
+
+    # 1. Fetch Metric Data
+    vllm_metrics = get_vllm_metrics()  # <--- Use dynamically discovered vLLM metrics
+    metric_dfs = {
+        label: fetch_metrics(
+            query, req.model_name, req.start_ts, req.end_ts, namespace=req.namespace
+        )
+        for label, query in vllm_metrics.items()  # <--- Iterate over discovered metrics
+    }
+
     is_all_models_query = (
         "all models currently deployed" in question_lower
         or "list all models" in question_lower
         or "what models are deployed" in question_lower.replace("?", "")
     )
     is_tokens_generated_query = "how many tokens generated" in question_lower
-
-    metrics_data_summary = ""
-    generated_tokens_sum_value = None
-
-    vllm_metrics = get_vllm_metrics()
-    metric_dfs = {
-        label: fetch_metrics(
-            query, req.model_name, req.start_ts, req.end_ts, namespace=req.namespace
-        )
-        for label, query in vllm_metrics.items()
-    }
 
     if is_tokens_generated_query:
         output_tokens_df = metric_dfs.get("Output Tokens Created")
@@ -858,17 +1147,57 @@ def chat_metrics(req: ChatMetricsRequest):
         # Reuse existing summary builder for the selected model's metrics
         metrics_data_summary = build_prompt(metric_dfs, req.model_name)
 
+    # 2. Fetch Alert Data
+    # promql_query_alerts, alerts_data = (
+    #     fetch_alerts_from_prometheus(
+    #         req.start_ts, req.end_ts, req.namespace
+    #     )
+    # )
+    promql_query_alerts, alerts_data = fetch_alerts_from_prometheus_mock(
+        req.start_ts, req.end_ts, req.namespace
+    )
+    # Prepare alert context for the LLM
+    relevant_alerts = [
+        a for a in alerts_data if a["labels"].get("test_alert", "false") != "true"
+    ]
+
+    # Fetch alert definitions from Prometheus, fallback to empty dict
+    alert_definitions = fetch_all_alert_definitions_from_prometheus()
+    if not alert_definitions:
+        alert_definitions = {}
+
+    alert_summary = format_alerts_for_ui(relevant_alerts, alert_definitions)
+
+    # 4. Compose the full prompt context for the LLM
+    full_prompt_context = f"""
+    Current Metric Status:
+    {metrics_data_summary.strip()}
+
+    Alert Status:
+    {alert_summary.strip()}
+    """  # Removed task description from here, it's in build_flexible_llm_prompt
+
     prompt = build_flexible_llm_prompt(
         req.question,
         req.model_name,
-        metrics_data_summary,
+        full_prompt_context,  # Pass the combined context
         generated_tokens_sum=generated_tokens_sum_value,
         selected_namespace=req.namespace,
+        alert_definitions=alert_definitions,
     )
-    llm_response = summarize_with_llm(prompt, req.summarize_model_id, req.api_key)
+    llm_response = summarize_with_llm(
+        prompt,
+        req.summarize_model_id,
+        req.api_key,
+        messages=req.messages,  # Pass messages here
+    )
 
     # Debug LLM response
     print("🧠 Raw LLM response:", llm_response)
+
+    promql = ""
+    summary = ""
+    parsed_successfully = False
 
     try:
         # Step 1: Clean the response
@@ -885,78 +1214,96 @@ def chat_metrics(req: ChatMetricsRequest):
 
         # Find the JSON object (more robust regex for nested braces)
         json_match = re.search(r"\{.*?\}", cleaned_response, re.DOTALL)
-        if not json_match:
-            raise ValueError(f"No JSON object found in response: '{cleaned_response}'")
 
-        json_string = json_match.group(0)
-        print("⚙️ Extracted JSON string:", json_string)
+        if json_match:
+            json_string = json_match.group(0)
+            print("⚙️ Extracted JSON string:", json_string)
 
-        # Clean the JSON string
-        # Remove any newlines and extra spaces
-        json_string = re.sub(r"\s+", " ", json_string)
-        print("⚙️ After whitespace normalization:", json_string)
+            # Clean the JSON string (existing logic)
+            json_string = re.sub(r"\s+", " ", json_string)
+            json_string = re.sub(
+                r"([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:", r'\1"\2":', json_string
+            )
+            json_string = re.sub(r'"([^"]+)"\s*"\s*:', r'"\1":', json_string)
+            json_string = re.sub(r",\s*}", "}", json_string)
+            print("🔍 Final Cleaned JSON string for parsing:", json_string)
 
-        # Ensure proper key quoting
-        json_string = re.sub(
-            r"([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:", r'\1"\2":', json_string
-        )
-        print("⚙️ After key quoting:", json_string)
-
-        # Fix any double-quoted keys
-        json_string = re.sub(r'"([^"]+)"\s*"\s*:', r'"\1":', json_string)
-        print("⚙️ After double-quoted key fix:", json_string)
-
-        # Removed the problematic value quoting regex
-        print("⚙️ Value quoting regex removed.")
-
-        # Remove trailing commas
-        json_string = re.sub(r",\s*}", "}", json_string)
-        print("⚙️ After trailing comma removal:", json_string)
-
-        print("🔍 Final Cleaned JSON string for parsing:", json_string)
-
-        # Parse the JSON
-        parsed = json.loads(json_string)
-
-        # Extract and clean the fields
-        promql = parsed.get("promql", "").strip()
-        summary = _clean_llm_summary_string(parsed.get("summary", ""))
-
-        # Aggressively ensure the correct namespace is in PromQL
-        if promql:
-            # Remove existing namespace labels from PromQL if present
-            promql = re.sub(r"\{([^}]*)namespace=[^,}]*(,)?", r"{\1", promql)
-            # Add the correct namespace. Handle cases where there are no existing labels or existing labels.
-            if "{" in promql:
-                promql = promql.replace("{", f'{{namespace="{req.namespace}", ')
-            else:
-                # If no existing curly braces, add them with the namespace
-                promql = f"{promql}{{namespace='{req.namespace}'}}"
-
-        if not summary:
-            raise ValueError("Empty summary in response")
-
-        return {"promql": promql, "summary": summary}
+            parsed = json.loads(json_string)
+            promql = parsed.get("promql", "").strip()
+            summary = _clean_llm_summary_string(parsed.get("summary", ""))
+            parsed_successfully = True
 
     except json.JSONDecodeError as e:
-        print(f"⚠️ JSON Decode Error: {e}")
-        print(f"Problematic JSON string: {json_string}")
-        return {
-            "promql": "",
-            "summary": f"Failed to parse response: {e}. Problematic string: '{json_string}'",
-        }
-    except ValueError as e:
-        print(f"⚠️ Value Error: {e}")
-        return {
-            "promql": "",
-            "summary": f"Failed to process response: {e}. Problematic string: '{json_string}'",
-        }
+        print(f"⚠️ JSON Decode Error during parsing: {e}")
+        # Print problem string and raw LLM response for debuggingP
+        print(
+            f"Problematic JSON string: '{json_string if 'json_string' in locals() else 'N/A'}' (Raw LLM: '{llm_response}')"
+        )
+    except ValueError as e:  # This usually means 'No JSON object found'
+        print(f"⚠️ Value Error during parsing: {e}")
+        print(f"Raw LLM response was: '{llm_response}'")
     except Exception as e:
-        print(f"⚠️ Unexpected error: {e}")
-        return {
-            "promql": "",
-            "summary": f"An unexpected error occurred: {e}. Raw LLM output: {llm_response}",
-        }
+        print(f"⚠️ Unexpected error during parsing: {e}")
+        print(f"Raw LLM response was: '{llm_response}'")
+
+    # Fallback if JSON parsing fails or summary is empty
+    if not parsed_successfully or not summary:
+        print(
+            "❗ JSON parsing failed or summary was empty. Attempting fallback summary."
+        )
+        fallback_summary = ""
+        # Try to extract any meaningful text if JSON failed or was empty
+        if llm_response and not parsed_successfully:
+            # Simple fallback: if no JSON was found, use the raw response
+            fallback_summary = _clean_llm_summary_string(llm_response)
+            # Remove any JSON-like parts if they were somehow missed by regexes
+            fallback_summary = re.sub(
+                r"\{.*?\}", "", fallback_summary, flags=re.DOTALL
+            ).strip()
+            if (
+                fallback_summary == ""
+            ):  # If still empty, maybe the LLM output was *just* bad JSON
+                fallback_summary = "AI did not provide a clear summary. Please rephrase your question or check the LLM output for errors."
+        elif not summary:  # JSON parsed, but summary field was empty
+            fallback_summary = (
+                "AI provided an empty summary. Please rephrase your question."
+            )
+
+        if fallback_summary:
+            summary = fallback_summary
+        else:  # Ultimate fallback if all else fails
+            summary = (
+                "AI could not generate a summary based on the provided information."
+            )
+            promql = ""  # Clear promql if summary is a fallback
+
+    # Aggressively ensure the correct namespace is in PromQL
+    if promql:
+        # Remove existing namespace labels from PromQL if present
+        promql = re.sub(r"\{([^}]*)namespace=[^,}]*(,)?", r"{\1", promql)
+        # Add the correct namespace. Handle cases where there are no existing labels or existing labels.
+        if "{" in promql:
+            promql = promql.replace("{", f'{{namespace="{req.namespace}", ')
+        else:
+            # If no existing curly braces, add them with the namespace
+            promql = f"{promql}{{namespace='{req.namespace}'}}"
+
+    # Compose the list of queries to return
+    queries_to_return = []
+
+    # Always add the metric query if the LLM generated one and there is relevant metric data
+    if (
+        promql
+        and metrics_data_summary
+        and "No data available" not in metrics_data_summary
+    ):
+        queries_to_return.append(promql)
+
+    # Always add the alert query, even if there are no relevant alerts
+    if promql_query_alerts and promql_query_alerts not in queries_to_return:
+        queries_to_return.append(promql_query_alerts)
+
+    return {"promql": queries_to_return, "summary": summary}
 
 
 # helper functions for report generation
@@ -1102,54 +1449,62 @@ def calculate_metrics_endpoint(request: MetricsCalculationRequest):
 
     return MetricsCalculationResponse(calculated_metrics=calculated_metrics)
 
+
 # --- OpenShift Helper Functions ---
+
 
 def fetch_openshift_metrics(query, start, end, namespace=None):
     """Fetch OpenShift metrics with optional namespace filtering"""
     headers = {"Authorization": f"Bearer {THANOS_TOKEN}"}
-    
+
     # Add namespace filter to the query if specified
     if namespace:
         import re
-        
+
         # Skip if namespace already exists in the query
         if f'namespace="{namespace}"' in query:
             pass  # Already has the correct namespace
         else:
             # Simple string replacements for common patterns
-            
+
             # Pattern 1: sum(metric_name)
-            pattern1 = r'sum\(([a-zA-Z_:][a-zA-Z0-9_:]*)\)'
+            pattern1 = r"sum\(([a-zA-Z_:][a-zA-Z0-9_:]*)\)"
             if re.search(pattern1, query):
                 query = re.sub(pattern1, f'sum(\\1{{namespace="{namespace}"}})', query)
-            
+
             # Pattern 2: sum(rate(metric_name[5m]))
-            elif re.search(r'sum\(rate\([a-zA-Z_:][a-zA-Z0-9_:]*\[[^\]]+\]\)\)', query):
-                pattern2 = r'sum\(rate\(([a-zA-Z_:][a-zA-Z0-9_:]*)\[([^\]]+)\]\)\)'
-                query = re.sub(pattern2, f'sum(rate(\\1{{namespace="{namespace}"}}[\\2]))', query)
-            
+            elif re.search(r"sum\(rate\([a-zA-Z_:][a-zA-Z0-9_:]*\[[^\]]+\]\)\)", query):
+                pattern2 = r"sum\(rate\(([a-zA-Z_:][a-zA-Z0-9_:]*)\[([^\]]+)\]\)\)"
+                query = re.sub(
+                    pattern2, f'sum(rate(\\1{{namespace="{namespace}"}}[\\2]))', query
+                )
+
             # Pattern 3: rate(metric_name[5m])
-            elif re.search(r'rate\([a-zA-Z_:][a-zA-Z0-9_:]*\[[^\]]+\]\)', query):
-                pattern3 = r'rate\(([a-zA-Z_:][a-zA-Z0-9_:]*)\[([^\]]+)\]\)'
-                query = re.sub(pattern3, f'rate(\\1{{namespace="{namespace}"}}[\\2])', query)
-            
+            elif re.search(r"rate\([a-zA-Z_:][a-zA-Z0-9_:]*\[[^\]]+\]\)", query):
+                pattern3 = r"rate\(([a-zA-Z_:][a-zA-Z0-9_:]*)\[([^\]]+)\]\)"
+                query = re.sub(
+                    pattern3, f'rate(\\1{{namespace="{namespace}"}}[\\2])', query
+                )
+
             # Pattern 4: metric_name{existing_labels}
-            elif re.search(r'[a-zA-Z_:][a-zA-Z0-9_:]*\{[^}]*\}', query):
-                pattern4 = r'([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}'
+            elif re.search(r"[a-zA-Z_:][a-zA-Z0-9_:]*\{[^}]*\}", query):
+                pattern4 = r"([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}"
                 query = re.sub(pattern4, f'\\1{{namespace="{namespace}",\\2}}', query)
-            
+
             # Pattern 5: simple metric_name (no labels)
-            elif re.search(r'^[a-zA-Z_:][a-zA-Z0-9_:]*$', query):
+            elif re.search(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$", query):
                 query = f'{query}{{namespace="{namespace}"}}'
-            
+
             # Pattern 6: handle other aggregations (avg, count, etc.)
             else:
-                for func in ['avg', 'count', 'max', 'min']:
-                    pattern = f'{func}\\(([a-zA-Z_:][a-zA-Z0-9_:]*)\\)'
+                for func in ["avg", "count", "max", "min"]:
+                    pattern = f"{func}\\(([a-zA-Z_:][a-zA-Z0-9_:]*)\\)"
                     if re.search(pattern, query):
-                        query = re.sub(pattern, f'{func}(\\1{{namespace="{namespace}"}})', query)
+                        query = re.sub(
+                            pattern, f'{func}(\\1{{namespace="{namespace}"}})', query
+                        )
                         break
-    
+
     response = requests.get(
         f"{PROMETHEUS_URL}/api/v1/query_range",
         headers=headers,
@@ -1164,11 +1519,11 @@ def fetch_openshift_metrics(query, start, end, namespace=None):
         for val in series["values"]:
             ts = datetime.fromtimestamp(float(val[0]))
             value = float(val[1])
-            
+
             # Handle NaN values that can't be JSON serialized
             if pd.isna(value) or value != value:  # Check for NaN
                 value = 0.0  # Convert NaN to 0 for JSON compatibility
-            
+
             row = dict(series["metric"])
             row["timestamp"] = ts
             row["value"] = value
@@ -1177,16 +1532,18 @@ def fetch_openshift_metrics(query, start, end, namespace=None):
     return pd.DataFrame(rows)
 
 
-def build_openshift_prompt(metric_dfs, metric_category, namespace=None, scope_description=None):
+def build_openshift_prompt(
+    metric_dfs, metric_category, namespace=None, scope_description=None
+):
     """Build prompt for OpenShift metrics analysis"""
     if scope_description:
         scope = scope_description
     else:
         scope = f"namespace **{namespace}**" if namespace else "cluster-wide"
-    
+
     header = f"You are evaluating OpenShift **{metric_category}** metrics for {scope}.\n\n📊 **Metrics**:\n"
     analysis_focus = f"{metric_category.lower()} performance and health"
-    
+
     lines = []
     for label, df in metric_dfs.items():
         if df.empty:
@@ -1199,13 +1556,13 @@ def build_openshift_prompt(metric_dfs, metric_category, namespace=None, scope_de
         lines.append(
             f"- {label}: Avg={avg:.2f}, Latest={latest:.2f}, Trend={trend}, {anomaly}"
         )
-    
+
     analysis_questions = f"""🔍 Please analyze:
 1. What's the current state of {analysis_focus}?
 2. Are there any performance or reliability concerns?
 3. What actions should be taken?
 4. Any optimization recommendations?"""
-    
+
     return f"""{header}
 {chr(10).join(lines)}
 
@@ -1237,7 +1594,7 @@ class OpenShiftChatRequest(BaseModel):
 
 def get_namespace_specific_metrics(category):
     """Get metrics that actually have namespace labels for namespace-specific analysis"""
-    
+
     namespace_aware_metrics = {
         "Fleet Overview": {
             # Metrics that work with namespace filtering
@@ -1248,7 +1605,7 @@ def get_namespace_specific_metrics(category):
             "Container Memory Usage": "sum(container_memory_usage_bytes)",
             "Pod Restart Rate": "sum(rate(kube_pod_container_status_restarts_total[5m]))",
         },
-                "Workloads & Pods": {
+        "Workloads & Pods": {
             # Pod and container metrics naturally have namespace labels
             "Pods Running": "sum(kube_pod_status_phase{phase='Running'})",
             "Pods Pending": "sum(kube_pod_status_phase{phase='Pending'})",
@@ -1285,11 +1642,12 @@ def get_namespace_specific_metrics(category):
             "Container Threads": "sum(container_threads)",
         },
     }
-    
+
     return namespace_aware_metrics.get(category, {})
 
 
 # --- OpenShift Endpoints ---
+
 
 @app.get("/openshift-metric-groups")
 def list_openshift_metric_groups():
@@ -1302,7 +1660,13 @@ def list_openshift_namespace_metric_groups():
     """Get available OpenShift metric groups for namespace-specific analysis"""
     # Return only categories that have namespace-specific implementations
     # These are the categories that make sense at namespace level
-    return ["Fleet Overview", "Workloads & Pods", "Compute & Resources", "Storage & Networking", "Application Services"]
+    return [
+        "Fleet Overview",
+        "Workloads & Pods",
+        "Compute & Resources",
+        "Storage & Networking",
+        "Application Services",
+    ]
 
 
 @app.get("/vllm-metrics")
@@ -1322,14 +1686,14 @@ def get_gpu_info():
     """Get GPU vendor and model information from DCGM metrics"""
     try:
         headers = {"Authorization": f"Bearer {THANOS_TOKEN}"}
-        
+
         # Try to get GPU info from various metrics
         info_queries = [
             "DCGM_FI_DEV_GPU_TEMP",  # Basic GPU metric to check GPU availability
             "gpu_operator_gpu_nodes_total",  # GPU operator metrics
             "vendor_model:node_accelerator_cards:sum",  # Vendor/model info
         ]
-        
+
         gpu_info = {
             "total_gpus": 0,
             "vendors": [],
@@ -1337,7 +1701,7 @@ def get_gpu_info():
             "temperatures": [],
             "power_usage": [],
         }
-        
+
         for query in info_queries:
             try:
                 response = requests.get(
@@ -1348,12 +1712,14 @@ def get_gpu_info():
                 )
                 response.raise_for_status()
                 result = response.json()["data"]["result"]
-                
+
                 if result and query == "DCGM_FI_DEV_GPU_TEMP":
                     # Extract GPU count and current temperatures
                     gpu_info["total_gpus"] = len(result)
-                    gpu_info["temperatures"] = [float(item["value"][1]) for item in result]
-                    
+                    gpu_info["temperatures"] = [
+                        float(item["value"][1]) for item in result
+                    ]
+
                     # Extract vendor/model from labels if available
                     for item in result:
                         labels = item.get("metric", {})
@@ -1363,19 +1729,25 @@ def get_gpu_info():
                             gpu_info["models"].append(labels["model"])
                         if "device" in labels:
                             gpu_info["models"].append(labels["device"])
-                            
+
             except Exception as e:
                 print(f"Error querying {query}: {e}")
                 continue
-        
+
         # Remove duplicates and sort
         gpu_info["vendors"] = sorted(list(set(gpu_info["vendors"])))
         gpu_info["models"] = sorted(list(set(gpu_info["models"])))
-        
+
         return gpu_info
     except Exception as e:
         print(f"Error fetching GPU info: {e}")
-        return {"total_gpus": 0, "vendors": [], "models": [], "temperatures": [], "power_usage": []}
+        return {
+            "total_gpus": 0,
+            "vendors": [],
+            "models": [],
+            "temperatures": [],
+            "power_usage": [],
+        }
 
 
 @app.get("/openshift-namespaces")
@@ -1399,7 +1771,11 @@ def list_openshift_namespaces():
         namespace_set = set()
         for entry in series:
             namespace = entry.get("namespace", "").strip()
-            if namespace and namespace not in ["kube-system", "openshift-system", "openshift-monitoring"]:
+            if namespace and namespace not in [
+                "kube-system",
+                "openshift-system",
+                "openshift-monitoring",
+            ]:
                 namespace_set.add(namespace)
         return sorted(list(namespace_set))
     except Exception as e:
@@ -1412,7 +1788,7 @@ def analyze_openshift(req: OpenShiftAnalyzeRequest):
     """Analyze OpenShift metrics for a specific category"""
     try:
         openshift_metrics = get_openshift_metrics()
-        
+
         # Validate metric category based on scope
         if req.scope == "namespace_scoped" and req.namespace:
             # For namespace-scoped analysis, check against namespace-specific metrics first
@@ -1420,16 +1796,22 @@ def analyze_openshift(req: OpenShiftAnalyzeRequest):
             if not namespace_metrics:
                 # Fall back to cluster-wide metrics if no namespace-specific metrics available
                 if req.metric_category not in openshift_metrics:
-                    raise HTTPException(status_code=400, detail=f"Invalid metric category: {req.metric_category}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid metric category: {req.metric_category}",
+                    )
                 metrics_to_fetch = openshift_metrics[req.metric_category]
             else:
                 metrics_to_fetch = namespace_metrics
         else:
             # For cluster-wide analysis, check against cluster-wide metrics
             if req.metric_category not in openshift_metrics:
-                raise HTTPException(status_code=400, detail=f"Invalid metric category: {req.metric_category}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid metric category: {req.metric_category}",
+                )
             metrics_to_fetch = openshift_metrics[req.metric_category]
-        
+
         # Determine namespace for fetching based on scope and available metrics
         # Don't use namespace filtering if we fell back to cluster-wide metrics (like GPU)
         namespace_for_query = None
@@ -1438,16 +1820,18 @@ def analyze_openshift(req: OpenShiftAnalyzeRequest):
             original_ns_metrics = get_namespace_specific_metrics(req.metric_category)
             if original_ns_metrics:
                 namespace_for_query = req.namespace
-        
+
         metric_dfs = {}
         for label, query in metrics_to_fetch.items():
             try:
-                df = fetch_openshift_metrics(query, req.start_ts, req.end_ts, namespace_for_query)
+                df = fetch_openshift_metrics(
+                    query, req.start_ts, req.end_ts, namespace_for_query
+                )
                 metric_dfs[label] = df
             except Exception as e:
                 print(f"Error fetching {label}: {e}")
                 metric_dfs[label] = pd.DataFrame()  # Empty DataFrame for failed queries
-        
+
         # Build analysis prompt
         scope_description = f"{req.scope.replace('_', ' ').title()}"
         if req.scope == "namespace_scoped" and req.namespace:
@@ -1457,8 +1841,10 @@ def analyze_openshift(req: OpenShiftAnalyzeRequest):
                 scope_description += f" ({req.namespace})"
             else:
                 scope_description += f" ({req.namespace}) - Note: {req.metric_category} metrics are cluster-wide"
-            
-        prompt = build_openshift_prompt(metric_dfs, req.metric_category, namespace_for_query, scope_description)
+
+        prompt = build_openshift_prompt(
+            metric_dfs, req.metric_category, namespace_for_query, scope_description
+        )
         summary = summarize_with_llm(prompt, req.summarize_model_id, req.api_key)
 
         # Serialize metrics for frontend
@@ -1470,11 +1856,11 @@ def analyze_openshift(req: OpenShiftAnalyzeRequest):
                     df[col] = pd.Series(
                         dtype="datetime64[ns]" if col == "timestamp" else "float"
                     )
-            
+
             # Handle any remaining NaN values before serialization
             if not df.empty and "value" in df.columns:
                 df["value"] = df["value"].fillna(0.0)  # Replace NaN with 0
-            
+
             serialized_metrics[label] = df[["timestamp", "value"]].to_dict(
                 orient="records"
             )
@@ -1501,7 +1887,7 @@ def chat_openshift(req: OpenShiftChatRequest):
     """Chat about OpenShift metrics for a specific category"""
     try:
         openshift_metrics = get_openshift_metrics()
-        
+
         # Validate metric category based on scope
         if req.scope == "namespace_scoped" and req.namespace:
             # For namespace-scoped analysis, check against namespace-specific metrics first
@@ -1509,40 +1895,52 @@ def chat_openshift(req: OpenShiftChatRequest):
             if not namespace_metrics:
                 # Fall back to cluster-wide metrics if no namespace-specific metrics available
                 if req.metric_category not in openshift_metrics:
-                    raise HTTPException(status_code=400, detail=f"Invalid metric category: {req.metric_category}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid metric category: {req.metric_category}",
+                    )
                 metrics_to_fetch = openshift_metrics[req.metric_category]
             else:
                 metrics_to_fetch = namespace_metrics
         else:
             # For cluster-wide analysis, check against cluster-wide metrics
             if req.metric_category not in openshift_metrics:
-                raise HTTPException(status_code=400, detail=f"Invalid metric category: {req.metric_category}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid metric category: {req.metric_category}",
+                )
             metrics_to_fetch = openshift_metrics[req.metric_category]
-        
+
         # Determine namespace for fetching based on scope
         namespace_for_query = req.namespace if req.scope == "namespace_scoped" else None
-        
+
         metric_dfs = {}
         # Fetch metrics for the specified category
         for label, query in metrics_to_fetch.items():
             try:
-                df = fetch_openshift_metrics(query, req.start_ts, req.end_ts, namespace_for_query)
+                df = fetch_openshift_metrics(
+                    query, req.start_ts, req.end_ts, namespace_for_query
+                )
                 metric_dfs[label] = df
             except Exception as e:
                 print(f"Error fetching {label}: {e}")
                 metric_dfs[label] = pd.DataFrame()
-        
+
         # Build scope description
         scope_description = f"{req.scope.replace('_', ' ').title()}"
         if req.scope == "namespace_scoped" and req.namespace:
             scope_description += f" ({req.namespace})"
-        
+
         # Build metrics summary for the LLM
-        metrics_data_summary = build_openshift_prompt(metric_dfs, req.metric_category, namespace_for_query, scope_description)
-        
+        metrics_data_summary = build_openshift_prompt(
+            metric_dfs, req.metric_category, namespace_for_query, scope_description
+        )
+
         # Create a simple prompt for OpenShift chat
-        context_description = f"OpenShift {req.metric_category} metrics for **{scope_description}**"
-            
+        context_description = (
+            f"OpenShift {req.metric_category} metrics for **{scope_description}**"
+        )
+
         prompt = f"""You are a senior Site Reliability Engineer (SRE) analyzing {context_description}.
 
 Current Metrics:
@@ -1558,26 +1956,26 @@ Provide a concise technical response focusing on operational insights and recomm
         # Simple JSON parsing
         try:
             # Try to extract JSON from response
-            json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
+            json_match = re.search(r"\{.*\}", llm_response, re.DOTALL)
             if json_match:
                 parsed = json.loads(json_match.group(0))
                 promql = parsed.get("promql", "").strip()
                 summary = parsed.get("summary", llm_response).strip()
-                
+
                 # Add namespace filtering to PromQL if specified and not already present
                 if promql and req.namespace and "namespace=" not in promql:
                     if "{" in promql:
                         promql = promql.replace("{", f'{{namespace="{req.namespace}", ')
                     else:
                         promql = f'{promql}{{namespace="{req.namespace}"}}'
-                
+
                 return {"promql": promql, "summary": summary}
         except json.JSONDecodeError:
             pass
-        
+
         # Fallback
         return {"promql": "", "summary": llm_response}
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1599,34 +1997,28 @@ def debug_metrics():
         )
         response.raise_for_status()
         all_metrics = response.json()["data"]
-        
+
         # Categorize metrics
         dcgm_metrics = [m for m in all_metrics if m.startswith("DCGM_")]
         vllm_metrics = [m for m in all_metrics if m.startswith("vllm:")]
         kube_metrics = [m for m in all_metrics if m.startswith("kube_")]
         container_metrics = [m for m in all_metrics if m.startswith("container_")]
-        
+
         return {
             "total_metrics": len(all_metrics),
             "dcgm_metrics": {
                 "count": len(dcgm_metrics),
-                "examples": dcgm_metrics[:10]  # First 10
+                "examples": dcgm_metrics[:10],  # First 10
             },
-            "vllm_metrics": {
-                "count": len(vllm_metrics),
-                "examples": vllm_metrics[:10]
-            },
-            "kube_metrics": {
-                "count": len(kube_metrics),
-                "examples": kube_metrics[:10]
-            },
+            "vllm_metrics": {"count": len(vllm_metrics), "examples": vllm_metrics[:10]},
+            "kube_metrics": {"count": len(kube_metrics), "examples": kube_metrics[:10]},
             "container_metrics": {
                 "count": len(container_metrics),
-                "examples": container_metrics[:10]
+                "examples": container_metrics[:10],
             },
             "gpu_info": get_gpu_info(),
             "discovered_vllm": discover_vllm_metrics(),
-            "discovered_dcgm": discover_dcgm_metrics()
+            "discovered_dcgm": discover_dcgm_metrics(),
         }
     except Exception as e:
         return {"error": str(e)}
@@ -1637,13 +2029,13 @@ def debug_query(req: dict):
     """Debug query rewriting for namespace filtering"""
     query = req.get("query", "")
     namespace = req.get("namespace", "")
-    
+
     print(f"Original query: {query}")
     print(f"Namespace: {namespace}")
-    
+
     # Simulate the query rewriting logic from fetch_openshift_metrics
     if namespace:
-        if not query.startswith(('sum(', 'avg(', 'count(', 'max(', 'min(')):
+        if not query.startswith(("sum(", "avg(", "count(", "max(", "min(")):
             # Check if query already has labels
             if "{" in query:
                 # Insert namespace into existing label set
@@ -1654,15 +2046,16 @@ def debug_query(req: dict):
         else:
             # For aggregated queries, add namespace filter inside the aggregation
             import re
+
             # Find the first metric name inside parentheses
-            match = re.search(r'(\w+\([^{(]+)(\{[^}]*\})?', query)
+            match = re.search(r"(\w+\([^{(]+)(\{[^}]*\})?", query)
             print(f"Regex match: {match}")
             if match:
                 base_part = match.group(1)
                 labels_part = match.group(2) if match.group(2) else "{}"
                 print(f"Base part: {base_part}")
                 print(f"Labels part: {labels_part}")
-                
+
                 if labels_part == "{}":
                     # No existing labels
                     new_labels = f'{{namespace="{namespace}"}}'
@@ -1670,12 +2063,138 @@ def debug_query(req: dict):
                     # Has existing labels, add namespace
                     new_labels = labels_part.replace("{", f'{{namespace="{namespace}",')
                 print(f"New labels: {new_labels}")
-                
+
                 # Replace the original pattern with the namespace-filtered version
                 old_pattern = match.group(0)
                 new_pattern = base_part + new_labels
                 print(f"Replacing '{old_pattern}' with '{new_pattern}'")
                 query = query.replace(old_pattern, new_pattern)
-    
+
     print(f"Final query: {query}")
-    return {"original": req.get("query", ""), "rewritten": query, "namespace": namespace}
+    return {
+        "original": req.get("query", ""),
+        "rewritten": query,
+        "namespace": namespace,
+    }
+
+
+def fetch_alerts_from_prometheus1(
+    start_ts: int,
+    end_ts: int,
+    namespace: Optional[str] = None,
+    alert_name_filter: Optional[str] = None,
+):
+    """
+    Fetches firing or inactive alerts directly from Prometheus/Thanos.
+    Can filter by alert name.
+    """
+    headers = {"Authorization": f"Bearer {os.getenv('THANOS_TOKEN', 'dummy_token')}"}
+
+    labels = []
+    if namespace:
+        labels.append(f'namespace="{namespace}"')
+    if alert_name_filter:
+        labels.append(f'alertname="{alert_name_filter}"')
+
+    if not labels:
+        promql_query = 'ALERTS{alertstate="firing"}'
+    else:  # If there are other labels, ensure alertstate="firing" is included
+        if 'alertstate="firing"' not in labels:  # Prevent duplicates if already there
+            labels.append('alertstate="firing"')
+        promql_query = f'ALERTS{{{",".join(labels)}}}'
+
+    prometheus_url_actual = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
+
+    response = requests.get(
+        f"{prometheus_url_actual}/api/v1/query_range",
+        headers=headers,
+        params={"query": promql_query, "start": start_ts, "end": end_ts, "step": "30s"},
+        verify=verify,
+    )
+    response.raise_for_status()
+    result = response.json()["data"]["result"]
+
+    alerts_data = []
+    for series in result:
+        alertname = series["metric"].get("alertname")
+        severity = series["metric"].get("severity")
+        alertstate = series["metric"].get("alertstate")
+        for_duration = series["metric"].get("for")
+
+        labels = series["metric"]
+
+        for val in series["values"]:
+            timestamp = datetime.fromtimestamp(float(val[0]))
+            is_firing = int(float(val[1]))
+
+            # Only append if alertname is one of the two specified
+            # if alertname in ("VLLMHighP95Latency", "VLLMHighAverageInferenceTime"):
+            alerts_data.append(
+                {
+                    "alertname": alertname,
+                    "severity": severity,
+                    "alertstate": alertstate,
+                    "timestamp": timestamp.isoformat(),
+                    "is_firing": is_firing,
+                    "for_duration": for_duration,
+                    "labels": labels,
+                }
+            )
+    return promql_query, alerts_data
+
+
+def build_alerts_ui_summary(alerts_data):
+    # Group alerts by date
+    alerts_by_date = defaultdict(list)
+    for alert in alerts_data:
+        date_str = alert["timestamp"][:10]  # 'YYYY-MM-DD'
+        alerts_by_date[date_str].append(alert)
+
+    summary_lines = []
+    for date, alerts in sorted(alerts_by_date.items()):
+        summary_lines.append(f"On {date}, the following alerts were firing:")
+        for alert in alerts:
+            desc = alert.get("description", "")
+            summary_lines.append(
+                f"- {alert['alertname']} (Severity: {alert['severity']}, Started: {alert['timestamp']})"
+                + (f": {desc}" if desc else "")
+            )
+        summary_lines.append("")  # Blank line between days
+
+    return "\n".join(summary_lines)
+
+
+if __name__ == "__main__":
+
+    test_date = datetime(2025, 7, 14)
+    start_ts = int(
+        datetime(
+            test_date.year, test_date.month, test_date.day, 0, 0, 0, tzinfo=timezone.utc
+        ).timestamp()
+    )
+    end_ts = int(
+        datetime(
+            test_date.year,
+            test_date.month,
+            test_date.day,
+            23,
+            59,
+            59,
+            tzinfo=timezone.utc,
+        ).timestamp()
+    )
+
+    test_target_namespace = None
+
+    promql_query_used, all_alerts = fetch_alerts_from_prometheus1(
+        start_ts,
+        end_ts,
+        namespace=test_target_namespace,
+    )
+
+    non_test_firing_alerts = [
+        alert
+        for alert in all_alerts
+        if alert["labels"].get("test_alert", "false") != "true"
+        and alert["is_firing"] == 1
+    ]
