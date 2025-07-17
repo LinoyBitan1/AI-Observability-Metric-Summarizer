@@ -89,14 +89,14 @@ MOCK_ALERTS_HISTORY = [
         },
     },
     {
-        "alertname": "VLLMHighP95Latency",
+        "alertname": "VLLMHighAverageInferenceTime",
         "severity": "critical",
         "alertstate": "firing",
-        "timestamp": "2025-07-13T19:38:06+00:00",
+        "timestamp": "2025-07-14T19:38:06+00:00",
         "is_firing": 1,
         "labels": {
             "__name__": "ALERTS",
-            "alertname": "VLLMHighP95Latency",
+            "alertname": "VLLMHighAverageInferenceTime",
             "alertstate": "firing",
             "model_name": "meta-llama/Llama-3.2-3B-Instruct",
             "namespace": "m2",

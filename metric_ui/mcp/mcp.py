@@ -974,11 +974,14 @@ def format_alerts_for_ui(alerts_data: list, alert_definitions: dict = None) -> s
         alert_name = alert.get("alertname", "UnknownAlert")
         severity = alert.get("severity", "unknown")
         meaning = alert.get("meaning")
-        if not meaning and alert_definitions and alert_name in alert_definitions:
-            meaning = alert_definitions[alert_name]
+        timestamp = alert.get("timestamp", "unknown time")
+        pod = alert["labels"].get("pod", "")
+        namespace = alert["labels"].get("namespace", "")
         summary_lines.append(
-            f"- **{alert_name}**: This alert, with severity **{severity}**, was firing."
-            + (f" Meaning: {meaning}" if meaning else "")
+            f"- **{alert_name}**: Severity: **{severity}**, Time: `{timestamp}`"
+            + (f", Pod: `{pod}`" if pod else "")
+            + (f", Namespace: `{namespace}`" if namespace else "")
+            + (f", Meaning: {meaning}" if meaning else "")
         )
 
     return "\n".join(summary_lines)
@@ -1021,11 +1024,15 @@ def fetch_all_alert_definitions_from_prometheus():
 def build_flexible_llm_prompt(
     question: str,
     model_name: str,
-    context_summary: str,
+    selected_namespace: str,
+    metrics_context: str,
+    alerts_context: str,
     generated_tokens_sum: Optional[float] = None,
-    selected_namespace: str = "",
-    alert_definitions: Optional[dict] = None,
 ) -> str:
+    """
+    Builds a comprehensive prompt for the LLM that includes both metrics and alerts,
+    encouraging it to find correlations between them.
+    """
     vllm_metrics = get_vllm_metrics()
     metrics_list = "\n".join(
         [f'- "{label}" (PromQL: {query})' for label, query in vllm_metrics.items()]
@@ -1041,34 +1048,29 @@ def build_flexible_llm_prompt(
         else ""
     )
 
-    # If alert_definitions is provided, add a section listing all alert meanings
-    alert_meanings_section = ""
-    if alert_definitions:
-        alert_meanings_section = "\n\nAlert Definitions (for reference):\n"
-        for alert_name, meaning in alert_definitions.items():
-            alert_meanings_section += f"- {alert_name}: {meaning}\n"
-
     return f"""
 {namespace_context}You are a distinguished engineer and MLOps expert, renowned for your ability to synthesize complex operational data into clear, insightful recommendations.
 
 Your task: Given the user's question, provide a PromQL query and a summary.
 
+
+Current Metric Status
+{metrics_context.strip()}
+
+Current Alert Status
+{alerts_context.strip()}
+
+{summary_tokens_generated.strip()}
+
 Available Metrics to Query in PromQL:
 {metrics_list}
 
-Current Operational Status (Metrics and Alerts):
-{context_summary.strip()}
-{summary_tokens_generated.strip()}
-{alert_meanings_section}
 
-IMPORTANT:
-- The "Alert Status" section below is grouped by date and lists only currently firing alerts.
-- If the user asks about alerts, reference the alert names, severities, and timestamps as shown in the Alert Status section.
-- For each alert, if possible, briefly explain what it means (e.g., "VLLMHighP95Latency: This alert means the 95th percentile latency for VLLM is above the threshold").
-- Use the grouped alert list directly in your answer if relevant, and keep the format clear and concise for UI display.
-- Respond with a single, complete JSON object with EXACTLY two fields:
-  - "promql": (string) A relevant PromQL query (empty string if not applicable). Do NOT include a namespace label in the PromQL query, the system will add it automatically.
-  - "summary": (string) Write a short, thoughtful paragraph as if you are advising a team of engineers. Offer clear, actionable insights, and sound like a senior technical leader. Use plain text only. Do NOT use markdown or any nested JSON-like structures within this string. Include actual values from "Current Operational Status" when relevant.
+IMPORTANT: Respond with a single, complete JSON object with EXACTLY two fields:
+"promql": (string) A relevant PromQL query (empty string if not applicable). Do NOT include a namespace label in the PromQL query.
+"summary": (string) Write a short, thoughtful paragraph as if you are advising a team of engineers. Offer clear, actionable insights, and sound like a senior technical leader. Use plain text only. Do NOT use markdown or any nested JSON-like structures within this string. Include actual values from "Current Operational Status" when relevant.
+
+**CRITICAL RULE: Base your summary EXCLUSIVELY on the data provided in the context. Do not invent alerts, metrics, or any other information that is not explicitly present in the context.**
 
 Rules for JSON output:
 - Use double quotes for all keys and string values.
@@ -1079,18 +1081,13 @@ Rules for JSON output:
 Example for an alert question:
 {{
   "promql": "ALERTS{{namespace=\"m2\"}}",
-  "summary": "On 2025-06-30, the following alerts were firing: VLLMHighP95Latency: with Severity: critical, Started: 2025-06-30T16:50:36. This alert means the 95th percentile latency for VLLM is above the threshold. VLLMHighAverageInferenceTime: with Severity: warning, Started: 2025-06-30T16:50:36. This alert means the average inference time for the model is higher than expected. Please investigate these issues to maintain system performance."
+  "summary": "On 2025-06-30, the following alerts were firing: VLLMHighP95Latency: with Severity: critical, Started: 2025-06-30T16:50:36. This alert means the 95th percentile latency for VLLM is above the threshold."
 }}
 
 Example for a metrics question:
 {{
   "promql": "count by(model_name) (vllm:request_prompt_tokens_created)",
-  "summary": "On 2025-06-30, the following alerts were firing: 
-                - VLLMHighP95Latency: with Severity: critical, Started: 2025-06-30T16:50:36. 
-                  This alert means the 95th percentile latency for VLLM is above the threshold. 
-                - VLLMHighAverageInferenceTime: with Severity: warning, Started: 2025-06-30T16:50:36. 
-                  This alert means the average inference time for the model is higher than expected. 
-            Please investigate these issues to maintain system performance."
+  "summary": "Based on the current metrics, the system is operating within expected parameters. However, I recommend monitoring the request rate closely as a precaution. If you anticipate increased load, consider scaling resources proactively to maintain performance."
 }}
 Question: {question}
 Response:""".strip()
@@ -1148,6 +1145,7 @@ def chat_prometheus(req: ChatPrometheusRequest):
         metrics_data_summary = build_prompt(metric_dfs, req.model_name)
 
     # 2. Fetch Alert Data
+
     # promql_query_alerts, alerts_data = (
     #     fetch_alerts_from_prometheus(
     #         req.start_ts, req.end_ts, req.namespace
@@ -1168,28 +1166,22 @@ def chat_prometheus(req: ChatPrometheusRequest):
 
     alert_summary = format_alerts_for_ui(relevant_alerts, alert_definitions)
 
-    # 4. Compose the full prompt context for the LLM
-    full_prompt_context = f"""
-    Current Metric Status:
-    {metrics_data_summary.strip()}
-
-    Alert Status:
-    {alert_summary.strip()}
-    """  # Removed task description from here, it's in build_flexible_llm_prompt
-
+    # 3. Build the Dynamic Prompt with all context
     prompt = build_flexible_llm_prompt(
         req.question,
         req.model_name,
-        full_prompt_context,  # Pass the combined context
-        generated_tokens_sum=generated_tokens_sum_value,
-        selected_namespace=req.namespace,
-        alert_definitions=alert_definitions,
+        req.namespace,
+        metrics_data_summary,
+        alert_summary,
+        generated_tokens_sum_value,
     )
+
+    # 5. Call the LLM and Process the Response
     llm_response = summarize_with_llm(
         prompt,
         req.summarize_model_id,
         req.api_key,
-        messages=req.messages,  # Pass messages here
+        messages=None,
     )
 
     # Debug LLM response
@@ -1199,6 +1191,7 @@ def chat_prometheus(req: ChatPrometheusRequest):
     summary = ""
     parsed_successfully = False
 
+    # 6. Parse the LLM's response and return it
     try:
         # Step 1: Clean the response
         cleaned_response = llm_response.strip()
@@ -1948,7 +1941,7 @@ Current Metrics:
 
 User Question: {req.question}
 
-Provide a concise technical response focusing on operational insights and recommendations. Respond with JSON format:
+Provide a concise technical response focusing on operational insights and recommendations. Respond with ONLY the JSON object, and nothing else. Do not add explanations, notes, or markdown outside the JSON.
 {{"promql": "relevant_query_if_applicable", "summary": "your_analysis"}}"""
 
         llm_response = summarize_with_llm(prompt, req.summarize_model_id, req.api_key)
@@ -2162,6 +2155,20 @@ def build_alerts_ui_summary(alerts_data):
         summary_lines.append("")  # Blank line between days
 
     return "\n".join(summary_lines)
+
+
+def extract_first_json(llm_output):
+    # Find the first JSON object in the output
+    json_match = re.search(r"\{[\s\S]*?\}", llm_output)
+    if json_match:
+        try:
+            return json.loads(json_match.group(0))
+        except Exception as e:
+            print(f"JSON decode error: {e}")
+            # Try to fix common issues (e.g., trailing commas, unescaped quotes)
+            # Optionally, use a library like 'json5' or 'demjson' for more robust parsing
+    # Fallback: return a generic summary
+    return {"promql": "", "summary": "AI did not return a valid JSON object."}
 
 
 if __name__ == "__main__":
